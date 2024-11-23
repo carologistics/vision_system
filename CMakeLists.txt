@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.8)
-project(picam_client_ros)
+project(picam_client)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
@@ -26,6 +26,7 @@ include_directories(include)
 
 add_library(base64 STATIC
   src/base64.cpp
+  include/picam_client/base64.h
 )
 
 add_executable(picam_client_node 
@@ -40,6 +41,7 @@ ament_target_dependencies(picam_client_node
   std_srvs
   cv_bridge
   OpenCV
+  picam_client
 )
 
 target_link_libraries(picam_client_node

@@ -31,15 +31,15 @@ PicamClientNode::PicamClientNode()
   image_marked_pub_ = create_publisher<sensor_msgs::msg::Image>("camera/image_marked", 10);
   detections_pub_ = create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
-  set_confidence_srv_ = create_service<picam_client_ros::srv::SetConfidence>(
+  set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
     "set_confidence",
     std::bind(&PicamClientNode::handle_set_confidence, this, std::placeholders::_1, std::placeholders::_2));
 
-  set_iou_srv_ = create_service<picam_client_ros::srv::SetIOU>(
+  set_iou_srv_ = create_service<picam_client::srv::SetIOU>(
     "set_iou",
     std::bind(&PicamClientNode::handle_set_iou, this, std::placeholders::_1, std::placeholders::_2));
 
-  stream_control_srv_ = create_service<picam_client_ros::srv::StreamControl>(
+  stream_control_srv_ = create_service<picam_client::srv::StreamControl>(
     "stream_control",
     std::bind(&PicamClientNode::handle_stream_control, this, std::placeholders::_1, std::placeholders::_2));
 
@@ -290,8 +290,8 @@ void PicamClientNode::handle_detection_message(const std::vector<char>& data)
 }
 
 void PicamClientNode::handle_set_confidence(
-  const std::shared_ptr<picam_client_ros::srv::SetConfidence::Request> request,
-  std::shared_ptr<picam_client_ros::srv::SetConfidence::Response> response)
+  const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
+  std::shared_ptr<picam_client::srv::SetConfidence::Response> response)
 {
   send_control_message(12, request->confidence);
   response->success = true;
@@ -299,8 +299,8 @@ void PicamClientNode::handle_set_confidence(
 }
 
 void PicamClientNode::handle_set_iou(
-  const std::shared_ptr<picam_client_ros::srv::SetIOU::Request> request,
-  std::shared_ptr<picam_client_ros::srv::SetIOU::Response> response)
+  const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
+  std::shared_ptr<picam_client::srv::SetIOU::Response> response)
 {
   send_control_message(13, request->iou);
   response->success = true;
@@ -308,8 +308,8 @@ void PicamClientNode::handle_set_iou(
 }
 
 void PicamClientNode::handle_stream_control(
-  const std::shared_ptr<picam_client_ros::srv::StreamControl::Request> request,
-  std::shared_ptr<picam_client_ros::srv::StreamControl::Response> response)
+  const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
+  std::shared_ptr<picam_client::srv::StreamControl::Response> response)
 {
   send_control_message(request->command);
   response->success = true;

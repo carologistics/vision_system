@@ -7,14 +7,14 @@ import os
 
 def generate_launch_description():
     config = os.path.join(
-        get_package_share_directory('picam_client_ros'),
+        get_package_share_directory('picam_client'),
         'config',
         'params.yaml'
     )
     
     return LaunchDescription([
         Node(
-            package='picam_client_ros',
+            package='picam_client',
             executable='picam_client_node',
             name='picam_client',
             parameters=[config],

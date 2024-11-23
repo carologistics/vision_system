@@ -1,13 +1,13 @@
-#ifndef PICAM_CLIENT_ROS__PICAM_CLIENT_NODE_HPP_
-#define PICAM_CLIENT_ROS__PICAM_CLIENT_NODE_HPP_
+#ifndef picam_client__PICAM_CLIENT_NODE_HPP_
+#define picam_client__PICAM_CLIENT_NODE_HPP_
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
-#include <picam_client_ros/srv/set_confidence.hpp>
-#include <picam_client_ros/srv/set_iou.hpp>
-#include <picam_client_ros/srv/stream_control.hpp>
+#include <picam_client/srv/set_confidence.hpp>
+#include <picam_client/srv/set_iou.hpp>
+#include <picam_client/srv/stream_control.hpp>
 
 #include <opencv2/opencv.hpp>
 #include <arpa/inet.h>
@@ -46,9 +46,9 @@ private:
   rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr detections_pub_;
 
   // Services
-  rclcpp::Service<picam_client_ros::srv::SetConfidence>::SharedPtr set_confidence_srv_;
-  rclcpp::Service<picam_client_ros::srv::SetIOU>::SharedPtr set_iou_srv_;
-  rclcpp::Service<picam_client_ros::srv::StreamControl>::SharedPtr stream_control_srv_;
+  rclcpp::Service<picam_client::srv::SetConfidence>::SharedPtr set_confidence_srv_;
+  rclcpp::Service<picam_client::srv::SetIOU>::SharedPtr set_iou_srv_;
+  rclcpp::Service<picam_client::srv::StreamControl>::SharedPtr stream_control_srv_;
 
   // Timer
   rclcpp::TimerBase::SharedPtr timer_;
@@ -65,14 +65,14 @@ private:
   
   // Service callbacks
   void handle_set_confidence(
-    const std::shared_ptr<picam_client_ros::srv::SetConfidence::Request> request,
-    std::shared_ptr<picam_client_ros::srv::SetConfidence::Response> response);
+    const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
+    std::shared_ptr<picam_client::srv::SetConfidence::Response> response);
   void handle_set_iou(
-    const std::shared_ptr<picam_client_ros::srv::SetIOU::Request> request,
-    std::shared_ptr<picam_client_ros::srv::SetIOU::Response> response);
+    const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
+    std::shared_ptr<picam_client::srv::SetIOU::Response> response);
   void handle_stream_control(
-    const std::shared_ptr<picam_client_ros::srv::StreamControl::Request> request,
-    std::shared_ptr<picam_client_ros::srv::StreamControl::Response> response);
+    const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
+    std::shared_ptr<picam_client::srv::StreamControl::Response> response);
 
   // Utility functions
   uint64_t ntohll(uint64_t val);
@@ -92,4 +92,4 @@ private:
 
 }  // namespace picam_client
 
-#endif  // PICAM_CLIENT_ROS__PICAM_CLIENT_NODE_HPP_
+#endif  // picam_client__PICAM_CLIENT_NODE_HPP_

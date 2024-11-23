@@ -51,7 +51,7 @@
 
 */
 
-#include "base64.h"
+#include "picam_client/base64.h"
 
 #include <algorithm>
 #include <stdexcept>
