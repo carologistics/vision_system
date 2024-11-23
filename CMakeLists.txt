@@ -29,9 +29,13 @@ add_library(base64 STATIC
   include/picam_client/base64.h
 )
 
+rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
+
 add_executable(picam_client_node 
   src/picam_client_node.cpp
 )
+
+target_link_libraries(picam_client_node "${cpp_typesupport_target}")
 
 ament_target_dependencies(picam_client_node
   rclcpp
@@ -41,7 +45,6 @@ ament_target_dependencies(picam_client_node
   std_srvs
   cv_bridge
   OpenCV
-  picam_client
 )
 
 target_link_libraries(picam_client_node

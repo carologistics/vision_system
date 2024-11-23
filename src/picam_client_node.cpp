@@ -7,7 +7,7 @@
  ****************************************************************************/
 
 #include "picam_client/picam_client_node.hpp"
-#include "base64.h"
+#include "picam_client/base64.h"
 #include <cv_bridge/cv_bridge.h>
 #include <chrono>
 #include <thread>
