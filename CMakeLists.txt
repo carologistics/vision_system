@@ -16,15 +16,17 @@ find_package(OpenCV REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/BoundingBox.msg"
-  "srv/SetConfidence.srv" 
+  "srv/SetConfidence.srv"
   "srv/SetIOU.srv"
   "srv/StreamControl.srv"
+  DEPENDENCIES std_msgs
 )
 
 include_directories(include)
 
-add_library(base64 src/base64.cpp)
+add_library(base64 STATIC
+  src/base64.cpp
+)
 
 add_executable(picam_client_node 
   src/picam_client_node.cpp
@@ -33,7 +35,9 @@ add_executable(picam_client_node
 ament_target_dependencies(picam_client_node
   rclcpp
   std_msgs
+  vision_msgs
   sensor_msgs
+  std_srvs
   cv_bridge
   OpenCV
 )
@@ -45,6 +49,12 @@ target_link_libraries(picam_client_node
 install(TARGETS
   picam_client_node
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

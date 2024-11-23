@@ -3,7 +3,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
-#include <picam_client_ros/msg/bounding_box.hpp>
+#include <vision_msgs/msg/detection2_d.hpp>
+#include <vision_msgs/msg/detection2_d_array.hpp>
 #include <picam_client_ros/srv/set_confidence.hpp>
 #include <picam_client_ros/srv/set_iou.hpp>
 #include <picam_client_ros/srv/stream_control.hpp>
@@ -14,10 +15,12 @@
 #include <string>
 #include <vector>
 
-class PicamClientNode : public rclcpp::Node
-{
+namespace picam_client {
+
+class PicamClientNode : public rclcpp::Node {
 public:
   explicit PicamClientNode();
+  virtual ~PicamClientNode();
 
 private:
   // ROS parameters
@@ -27,10 +30,10 @@ private:
   int camera_height_;
 
   // Connection state
-  bool connected_ = false;
-  int disconnect_counter_ = 0;
-  uint64_t last_msg_time_ = 0;
-  int msg_counter_ = 0;
+  bool connected_{false};
+  int disconnect_counter_{0};
+  uint64_t last_msg_time_{0};
+  int msg_counter_{0};
 
   // Socket vars
   int sockfd_;
@@ -40,14 +43,14 @@ private:
   // Publishers
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_marked_pub_;
-  rclcpp::Publisher<picam_client_ros::msg::BoundingBox>::SharedPtr bbox_pub_;
+  rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr detections_pub_;
 
   // Services
   rclcpp::Service<picam_client_ros::srv::SetConfidence>::SharedPtr set_confidence_srv_;
   rclcpp::Service<picam_client_ros::srv::SetIOU>::SharedPtr set_iou_srv_;
   rclcpp::Service<picam_client_ros::srv::StreamControl>::SharedPtr stream_control_srv_;
 
-  // Timers
+  // Timer
   rclcpp::TimerBase::SharedPtr timer_;
 
   // Methods
@@ -56,7 +59,7 @@ private:
   void send_configure_message();
   void send_control_message(uint8_t message_type);
   void send_control_message(uint8_t message_type, float payload);
-  bool receive_data(int sockfd, char *buffer, size_t size);
+  bool receive_data(int sockfd, char* buffer, size_t size);
   void handle_image_message(const std::vector<char>& data, bool marked);
   void handle_detection_message(const std::vector<char>& data);
   
@@ -71,7 +74,7 @@ private:
     const std::shared_ptr<picam_client_ros::srv::StreamControl::Request> request,
     std::shared_ptr<picam_client_ros::srv::StreamControl::Response> response);
 
-  // Utility functions  
+  // Utility functions
   uint64_t ntohll(uint64_t val);
   float ntohlf(float val);
   uint32_t htonf(float val);
@@ -86,5 +89,7 @@ private:
   static constexpr int DISCONNECT_THRESHOLD = 10;
   static constexpr int RECONNECT_INTERVAL = 5;
 };
+
+}  // namespace picam_client
 
 #endif  // PICAM_CLIENT_ROS__PICAM_CLIENT_NODE_HPP_

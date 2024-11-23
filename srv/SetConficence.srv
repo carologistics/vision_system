@@ -1,0 +1,4 @@
+float32 confidence   # Detection confidence threshold
+---
+bool success
+string message
