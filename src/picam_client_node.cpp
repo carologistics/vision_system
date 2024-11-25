@@ -8,7 +8,7 @@
 
 #include "picam_client/picam_client_node.hpp"
 #include "picam_client/base64.h"
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <chrono>
 #include <thread>
 
@@ -152,8 +152,8 @@ void PicamClientNode::send_configure_message()
   float k5 = declare_and_get("camera_matrix.k5", 0.0);
 
   int offset = 0;
-  auto pack = [&header, &offset](float val) {
-    uint32_t network_val = htonf(val);
+  auto pack = [this, &header, &offset](float val) {
+    uint32_t network_val = this->htonf(val);
     std::memcpy(&header[offset], &network_val, 4);
     offset += 4;
   };
@@ -169,7 +169,7 @@ void PicamClientNode::send_configure_message()
 
 void PicamClientNode::send_control_message(uint8_t message_type)
 {
-  char header[CONTROL_HEADER_SIZE] = {message_type};
+  uint8_t header[CONTROL_HEADER_SIZE] = {message_type};
   send(sockfd_, header, CONTROL_HEADER_SIZE, 0);
 }
 
@@ -193,7 +193,7 @@ bool PicamClientNode::receive_data(int sockfd, char *buffer, size_t size)
   return true;
 }
 
-void PicamClientNode::handle_image_message(const std::vector<char>& data, bool marked)
+void PicamClientNode::handle_image_message(const std::vector<char>& /*data*/, bool marked)
 {
   data_.resize(HEADER_SIZE_1);
   if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_1)) {
@@ -239,7 +239,7 @@ void PicamClientNode::handle_image_message(const std::vector<char>& data, bool m
   }
 }
 
-void PicamClientNode::handle_detection_message(const std::vector<char>& data)
+void PicamClientNode::handle_detection_message(const std::vector<char>& /*data*/)
 {
   data_.resize(HEADER_SIZE_3);
   if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_3)) {
@@ -277,9 +277,10 @@ void PicamClientNode::handle_detection_message(const std::vector<char>& data)
   detection.bbox.center.position.y = y;
   detection.bbox.size_x = w;
   detection.bbox.size_y = h;
-  detection.results.push_back(vision_msgs::msg::ObjectHypothesis());
-  detection.results.back().score = acc;
-  detection.results.back().class_id = std::to_string(cls);
+  vision_msgs::msg::ObjectHypothesisWithPose hypothesis;
+  hypothesis.hypothesis.score = acc;
+  hypothesis.hypothesis.class_id = std::to_string(cls);
+  detection.results.push_back(hypothesis);
 
   auto array_msg = vision_msgs::msg::Detection2DArray();
   array_msg.header.stamp = rclcpp::Time(timestamp);

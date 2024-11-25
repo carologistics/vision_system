@@ -35,7 +35,12 @@ add_executable(picam_client_node
   src/picam_client_node.cpp
 )
 
-target_link_libraries(picam_client_node "${cpp_typesupport_target}")
+target_link_libraries(picam_client_node
+  "${cpp_typesupport_target}"
+  base64
+  ${cv_bridge_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+)
 
 ament_target_dependencies(picam_client_node
   rclcpp
@@ -45,10 +50,6 @@ ament_target_dependencies(picam_client_node
   std_srvs
   cv_bridge
   OpenCV
-)
-
-target_link_libraries(picam_client_node
-  base64
 )
 
 install(TARGETS
