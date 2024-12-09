@@ -1,7 +1,7 @@
 picam_client:
   ros__parameters:
-    server_ip: "127.0.0.1"
-    server_port: 8080
+    server_ip: "192.168.0.100"
+    server_port: 6465
     camera_width: 640
     camera_height: 480
     camera_matrix:
