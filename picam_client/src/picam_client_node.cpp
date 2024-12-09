@@ -1,26 +1,34 @@
-/***************************************************************************
- *  picam_client_node.cpp - ROS2 node to subscribe to camera streams from the
- *                         raspberry pi camera
- *
- *  Created: Sun Jun 30 17:36:00 2024
- *  Copyright  2024 Daniel Swoboda
- ****************************************************************************/
+// Copyright (c) 2024 Carologistics
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "picam_client/picam_client_node.hpp"
 #include "picam_client/base64.h"
-#include <cv_bridge/cv_bridge.hpp>
 #include <chrono>
+#include <cv_bridge/cv_bridge.hpp>
 #include <thread>
 
 namespace picam_client {
 
-PicamClientNode::PicamClientNode() 
-: Node("picam_client")
-{
+PicamClientNode::PicamClientNode() : Node("picam_client") {
   declare_parameter("server_ip", "127.0.0.1");
   declare_parameter("server_port", 8080);
   declare_parameter("camera_width", 640);
   declare_parameter("camera_height", 480);
+
+  // Declare detection parameters
+  declare_parameter("detection.confidence", 0.5);
+  declare_parameter("detection.iou", 0.45);
 
   server_ip_ = get_parameter("server_ip").as_string();
   server_port_ = get_parameter("server_port").as_int();
@@ -28,79 +36,94 @@ PicamClientNode::PicamClientNode()
   camera_height_ = get_parameter("camera_height").as_int();
 
   image_pub_ = create_publisher<sensor_msgs::msg::Image>("camera/image", 10);
-  image_marked_pub_ = create_publisher<sensor_msgs::msg::Image>("camera/image_marked", 10);
-  detections_pub_ = create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
+  image_marked_pub_ =
+      create_publisher<sensor_msgs::msg::Image>("camera/image_marked", 10);
+  detections_pub_ =
+      create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
   set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
-    "set_confidence",
-    std::bind(&PicamClientNode::handle_set_confidence, this, std::placeholders::_1, std::placeholders::_2));
+      "/picam_client/set_confidence", // Add full path
+      std::bind(&PicamClientNode::handle_set_confidence, this,
+                std::placeholders::_1, std::placeholders::_2));
 
   set_iou_srv_ = create_service<picam_client::srv::SetIOU>(
-    "set_iou",
-    std::bind(&PicamClientNode::handle_set_iou, this, std::placeholders::_1, std::placeholders::_2));
+      "/picam_client/set_iou", // Add full path
+      std::bind(&PicamClientNode::handle_set_iou, this, std::placeholders::_1,
+                std::placeholders::_2));
 
   stream_control_srv_ = create_service<picam_client::srv::StreamControl>(
-    "stream_control",
-    std::bind(&PicamClientNode::handle_stream_control, this, std::placeholders::_1, std::placeholders::_2));
+      "/picam_client/stream_control", // Add full path
+      std::bind(&PicamClientNode::handle_stream_control, this,
+                std::placeholders::_1, std::placeholders::_2));
 
-  timer_ = create_wall_timer(
-    std::chrono::milliseconds(100),
-    std::bind(&PicamClientNode::timer_callback, this));
+  // After creating services, add debug logs
+  RCLCPP_INFO(get_logger(), "Service '/set_confidence' created at: %s",
+              set_confidence_srv_->get_service_name());
+  RCLCPP_INFO(get_logger(), "Service '/set_iou' created at: %s",
+              set_iou_srv_->get_service_name());
+  RCLCPP_INFO(get_logger(), "Service '/stream_control' created at: %s",
+              stream_control_srv_->get_service_name());
+
+  // Add a small delay to allow service discovery
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  // Remove timer creation
+  // Instead, start the read thread:
+  read_thread_ = std::thread(&PicamClientNode::read_loop, this);
 
   RCLCPP_INFO(get_logger(), "PiCam Client Node initialized");
   RCLCPP_INFO(get_logger(), "OpenCV version: %s", CV_VERSION);
 }
 
-PicamClientNode::~PicamClientNode() 
-{
+PicamClientNode::~PicamClientNode() {
+  should_exit_ = true;
+  if (read_thread_.joinable()) {
+    read_thread_.join();
+  }
   if (sockfd_ >= 0) {
     close(sockfd_);
   }
 }
 
-void PicamClientNode::timer_callback()
-{
-  if (connected_) {
-    if (disconnect_counter_ >= DISCONNECT_THRESHOLD) {
+void PicamClientNode::read_loop() {
+  while (!should_exit_) {
+    if (!connected_) {
+      if (connect_to_server() < 0) {
+        RCLCPP_ERROR(get_logger(), "Failed to connect, retrying...");
+        std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_INTERVAL));
+        continue;
+      }
+      RCLCPP_INFO(get_logger(), "Connected to server");
+      connected_ = true;
+    }
+
+    // Read incoming messages
+    data_.resize(1);
+    if (!receive_data(sockfd_, data_.data(), 1)) {
       RCLCPP_ERROR(get_logger(), "Connection lost");
       connected_ = false;
       close(sockfd_);
-      return;
-    }
-
-    data_.resize(1);
-    if (!receive_data(sockfd_, data_.data(), 1)) {
-      RCLCPP_ERROR(get_logger(), "Failed to read message type");
-      std::this_thread::sleep_for(std::chrono::seconds(SLEEP_INTERVAL));
-      disconnect_counter_++;
-      return;
+      continue;
     }
 
     uint8_t message_type = data_[0];
-    switch(message_type) {
-      case 1:
-      case 2:
-        handle_image_message(data_, message_type == 2);
-        break;
-      case 3:
-        handle_detection_message(data_);
-        break;
-      default:
-        RCLCPP_WARN(get_logger(), "Unknown message type: %d", message_type);
-    }
-  } else {
-    if (connect_to_server() < 0) {
-      RCLCPP_ERROR(get_logger(), "Failed to connect, retrying...");
-      std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_INTERVAL));
-    } else {
-      RCLCPP_INFO(get_logger(), "Connected to server");
-      connected_ = true;
+    switch (message_type) {
+    case 1:
+      handle_image_message(data_, false);
+      break;
+    case 2:
+      handle_image_message(data_, true);
+      break;
+    case 3:
+      handle_detection_message(data_);
+      break;
+    default:
+      RCLCPP_WARN(get_logger(), "Unknown message type: %d", message_type);
     }
   }
 }
 
-int PicamClientNode::connect_to_server()
-{
+int PicamClientNode::connect_to_server() {
   sockfd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd_ < 0) {
     RCLCPP_ERROR(get_logger(), "Socket creation error");
@@ -115,7 +138,8 @@ int PicamClientNode::connect_to_server()
     return -1;
   }
 
-  if (connect(sockfd_, (struct sockaddr *)&server_addr_, sizeof(server_addr_)) < 0) {
+  if (connect(sockfd_, (struct sockaddr *)&server_addr_, sizeof(server_addr_)) <
+      0) {
     RCLCPP_ERROR(get_logger(), "Connection failed");
     close(sockfd_);
     return -1;
@@ -128,11 +152,10 @@ int PicamClientNode::connect_to_server()
   return 0;
 }
 
-void PicamClientNode::send_configure_message()
-{
+void PicamClientNode::send_configure_message() {
   char header[CONFIGURE_MESSAGE_SIZE];
-  
-  auto declare_and_get = [this](const std::string& name, float default_val) {
+
+  auto declare_and_get = [this](const std::string &name, float default_val) {
     declare_parameter(name, default_val);
     return get_parameter(name).as_double();
   };
@@ -158,23 +181,33 @@ void PicamClientNode::send_configure_message()
     offset += 4;
   };
 
-  pack(old_f_x); pack(old_f_y); pack(old_ppx); pack(old_ppy);
-  pack(new_f_x); pack(new_f_y); pack(new_ppx); pack(new_ppy);
-  pack(k1); pack(k2); pack(k3); pack(k4); pack(k5);
+  pack(old_f_x);
+  pack(old_f_y);
+  pack(old_ppx);
+  pack(old_ppy);
+  pack(new_f_x);
+  pack(new_f_y);
+  pack(new_ppx);
+  pack(new_ppy);
+  pack(k1);
+  pack(k2);
+  pack(k3);
+  pack(k4);
+  pack(k5);
 
-  if (send(sockfd_, header, CONFIGURE_MESSAGE_SIZE, 0) != CONFIGURE_MESSAGE_SIZE) {
+  if (send(sockfd_, header, CONFIGURE_MESSAGE_SIZE, 0) !=
+      CONFIGURE_MESSAGE_SIZE) {
     RCLCPP_ERROR(get_logger(), "Failed to send configuration");
   }
 }
 
-void PicamClientNode::send_control_message(uint8_t message_type)
-{
+void PicamClientNode::send_control_message(uint8_t message_type) {
   uint8_t header[CONTROL_HEADER_SIZE] = {message_type};
   send(sockfd_, header, CONTROL_HEADER_SIZE, 0);
 }
 
-void PicamClientNode::send_control_message(uint8_t message_type, float payload)
-{
+void PicamClientNode::send_control_message(uint8_t message_type,
+                                           float payload) {
   char header[CONTROL_HEADER_SIZE_PAYLOAD];
   header[0] = message_type;
   uint32_t network_payload = htonf(payload);
@@ -182,19 +215,19 @@ void PicamClientNode::send_control_message(uint8_t message_type, float payload)
   send(sockfd_, header, CONTROL_HEADER_SIZE_PAYLOAD, 0);
 }
 
-bool PicamClientNode::receive_data(int sockfd, char *buffer, size_t size)
-{
+bool PicamClientNode::receive_data(int sockfd, char *buffer, size_t size) {
   size_t total_bytes = 0;
   while (total_bytes < size) {
     ssize_t bytes = read(sockfd, buffer + total_bytes, size - total_bytes);
-    if (bytes <= 0) return false;
+    if (bytes <= 0)
+      return false;
     total_bytes += bytes;
   }
   return true;
 }
 
-void PicamClientNode::handle_image_message(const std::vector<char>& /*data*/, bool marked)
-{
+void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
+                                           bool marked) {
   data_.resize(HEADER_SIZE_1);
   if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_1)) {
     RCLCPP_ERROR(get_logger(), "Failed to read image header");
@@ -229,7 +262,8 @@ void PicamClientNode::handle_image_message(const std::vector<char>& /*data*/, bo
     return;
   }
 
-  auto msg = cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
+  auto msg =
+      cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
   msg->header.stamp = rclcpp::Time(timestamp);
 
   if (marked) {
@@ -239,8 +273,8 @@ void PicamClientNode::handle_image_message(const std::vector<char>& /*data*/, bo
   }
 }
 
-void PicamClientNode::handle_detection_message(const std::vector<char>& /*data*/)
-{
+void PicamClientNode::handle_detection_message(
+    const std::vector<char> & /*data*/) {
   data_.resize(HEADER_SIZE_3);
   if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_3)) {
     RCLCPP_ERROR(get_logger(), "Failed to read detection header");
@@ -250,7 +284,7 @@ void PicamClientNode::handle_detection_message(const std::vector<char>& /*data*/
   uint64_t timestamp;
   float x, y, h, w, acc;
   uint32_t cls;
-  
+
   std::memcpy(&timestamp, &data_[0], 8);
   std::memcpy(&x, &data_[8], 4);
   std::memcpy(&y, &data_[12], 4);
@@ -291,39 +325,77 @@ void PicamClientNode::handle_detection_message(const std::vector<char>& /*data*/
 }
 
 void PicamClientNode::handle_set_confidence(
-  const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
-  std::shared_ptr<picam_client::srv::SetConfidence::Response> response)
-{
+    const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
+    std::shared_ptr<picam_client::srv::SetConfidence::Response> response) {
   send_control_message(12, request->confidence);
   response->success = true;
   response->message = "Confidence set";
 }
 
 void PicamClientNode::handle_set_iou(
-  const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
-  std::shared_ptr<picam_client::srv::SetIOU::Response> response)
-{
+    const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
+    std::shared_ptr<picam_client::srv::SetIOU::Response> response) {
   send_control_message(13, request->iou);
   response->success = true;
   response->message = "IOU set";
 }
 
 void PicamClientNode::handle_stream_control(
-  const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
-  std::shared_ptr<picam_client::srv::StreamControl::Response> response)
-{
-  send_control_message(request->command);
-  response->success = true;
-  response->message = "Stream control command sent";
+    const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
+    std::shared_ptr<picam_client::srv::StreamControl::Response> response) {
+  switch (request->command) {
+  case picam_client::srv::StreamControl::Request::ACTIVATE:
+    send_control_message(4);
+    response->success = true;
+    response->message = "Stream activated";
+    break;
+  case picam_client::srv::StreamControl::Request::ACTIVATE_MARKED:
+    send_control_message(5);
+    response->success = true;
+    response->message = "Marked stream activated";
+    break;
+  case picam_client::srv::StreamControl::Request::DEACTIVATE:
+    send_control_message(6);
+    response->success = true;
+    response->message = "Stream deactivated";
+    break;
+  case picam_client::srv::StreamControl::Request::DEACTIVATE_MARKED:
+    send_control_message(7);
+    response->success = true;
+    response->message = "Marked stream deactivated";
+    break;
+  case picam_client::srv::StreamControl::Request::SWITCH_TO_WORKPIECE:
+    send_control_message(8);
+    response->success = true;
+    response->message = "Switched to workpiece detection";
+    break;
+  case picam_client::srv::StreamControl::Request::SWITCH_TO_CONVEYOR:
+    send_control_message(9);
+    response->success = true;
+    response->message = "Switched to conveyor detection";
+    break;
+  case picam_client::srv::StreamControl::Request::SWITCH_TO_SLIDE:
+    send_control_message(10);
+    response->success = true;
+    response->message = "Switched to slide detection";
+    break;
+  case picam_client::srv::StreamControl::Request::SWITCH_OFF_DETECTION:
+    send_control_message(11);
+    response->success = true;
+    response->message = "Detection switched off";
+    break;
+  default:
+    response->success = false;
+    response->message = "Unknown command";
+    break;
+  }
 }
 
-uint64_t PicamClientNode::ntohll(uint64_t val)
-{
+uint64_t PicamClientNode::ntohll(uint64_t val) {
   return ((uint64_t)ntohl(val & 0xFFFFFFFF) << 32) | ntohl(val >> 32);
 }
 
-float PicamClientNode::ntohlf(float val)
-{
+float PicamClientNode::ntohlf(float val) {
   uint32_t temp;
   std::memcpy(&temp, &val, 4);
   temp = ntohl(temp);
@@ -331,17 +403,15 @@ float PicamClientNode::ntohlf(float val)
   return val;
 }
 
-uint32_t PicamClientNode::htonf(float val)
-{
+uint32_t PicamClientNode::htonf(float val) {
   uint32_t temp;
   std::memcpy(&temp, &val, 4);
   return htonl(temp);
 }
 
-}  // namespace picam_client
+} // namespace picam_client
 
-int main(int argc, char** argv)
-{
+int main(int argc, char **argv) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<picam_client::PicamClientNode>());
   rclcpp::shutdown();

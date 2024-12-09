@@ -31,7 +31,7 @@ add_library(base64 STATIC
 
 rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
 
-add_executable(picam_client_node 
+add_executable(picam_client_node
   src/picam_client_node.cpp
 )
 
