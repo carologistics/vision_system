@@ -1,0 +1,23 @@
+picam_client:
+  ros__parameters:
+    server_ip: 192.168.0.100
+    server_port: 6465
+    camera_width: 640
+    camera_height: 480
+    camera_matrix:
+      old_f_x: 0.
+      old_f_y: 0.
+      old_ppx: 0.
+      old_ppy: 0.
+      new_f_x: 0.
+      new_f_y: 0.
+      new_ppx: 0.
+      new_ppy: 0.
+      k1: 0.
+      k2: 0.
+      k3: 0.
+      k4: 0.
+      k5: 0.
+    detection:
+      confidence: 0.5
+      iou: 0.45
