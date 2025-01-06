@@ -145,7 +145,7 @@ void ObjectTrackingServer::update_pose()
 
 	geometry_msgs::msg::TransformStamped t;
 
-	//t.header.stamp = std::chrono::system_clock::now(); //this->get_clock()->now(); todo: needs to be a node before
+	t.header.stamp = this->get_clock()->now();
 	t.header.frame_id = "/odom";
 	t.child_frame_id = "target_object";
 
@@ -170,7 +170,7 @@ void ObjectTrackingServer::update_pose()
 	//todo: update tf
 	geometry_msgs::msg::TransformStamped t_pub;
 
-	//t_pub.header.stamp = std::chrono::system_clock::now(); //this->get_clock()->now(); todo: needs to be a node before
+	t_pub.header.stamp = this->get_clock()->now();
 	t_pub.header.frame_id = "/odom";
 	t_pub.child_frame_id = "target_object";
 
