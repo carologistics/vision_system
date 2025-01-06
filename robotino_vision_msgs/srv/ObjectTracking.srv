@@ -1,0 +1,7 @@
+string object_type
+string reference_frame
+float64 distance_threshold
+string object_tf_name
+---
+bool success
+string error
