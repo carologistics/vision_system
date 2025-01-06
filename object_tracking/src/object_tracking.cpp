@@ -1,6 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include "object_tracking/object_tracking.hpp"
-#include "robotino_vision_msgs/srv/object_tracking.hpp"
+#include "robotino_vision_msgs/srv/toggle_object_tracking.hpp"
 
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -41,9 +41,30 @@ void init()
 void compute_pose(const std::shared_ptr<ObjectTrackingRequest> request,
           std::shared_ptr<ObjectTrackingResponse> response)
 {
-	//todo: sanity checks: define types cleaner in msg
+	if(request->enable){
+		//sanity checks
+		if(request->object_type != "WORKPIECE" &&
+		   request->object_type != "CONVEYOR" &&
+		   request->object_type != "SLIDE"){
+			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Object type: %s unknown!", request->object_type.c_str());
+			response->error = "Invalid Request Parameter";
+			response->success = false;
+			return;
+		} else if(request->distance_threshold < 0){
+			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Negative distance threshold: %f", request->distance_threshold);
+			response->error = "Invalid Request Parameter";
+			response->success = false;
+			return;
+		}
+	//todo: check if laserline and yolo is updating
 
 	response->success = true;
+	} else {
+		//todo: stop spinning node
+		response->success = true;
+		return;
+	}
+
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Incoming request: \nobject_type: %s \nreference_frame: %s \ndistance_threshold: %f \nobject_tf_name: %s",
                 request->object_type.c_str(), request->reference_frame.c_str(), request->distance_threshold, request->object_tf_name.c_str());
 

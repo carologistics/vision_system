@@ -17,7 +17,7 @@ set(dependencies
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/ObjectTracking.srv"
+  "srv/ToggleObjectTracking.srv"
 )
 
 ament_package()

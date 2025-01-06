@@ -2,7 +2,7 @@
 #define OBJECT_TRACKING__OBJECT_TRACKING_HPP_
 
 #include "rclcpp/rclcpp.hpp"
-#include "robotino_vision_msgs/srv/object_tracking.hpp"
+#include "robotino_vision_msgs/srv/toggle_object_tracking.hpp"
 
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2/LinearMath/Quaternion.h"
@@ -10,7 +10,7 @@
 
 #include <memory>
 
-using ObjectTrackingService = robotino_vision_msgs::srv::ObjectTracking;
+using ObjectTrackingService = robotino_vision_msgs::srv::ToggleObjectTracking;
 
 //public:
 using ObjectTrackingRequest = ObjectTrackingService::Request;

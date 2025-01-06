@@ -1,3 +1,4 @@
+bool enable
 string object_type
 string reference_frame
 float64 distance_threshold
