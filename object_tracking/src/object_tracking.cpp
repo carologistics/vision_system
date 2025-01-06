@@ -1,3 +1,4 @@
+#include <chrono>
 #include "rclcpp/rclcpp.hpp"
 #include "object_tracking/object_tracking.hpp"
 #include "robotino_vision_msgs/srv/toggle_object_tracking.hpp"
@@ -9,7 +10,26 @@
 
 #include <memory>
 
-void init()
+ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
+{
+	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes");
+	this->init();
+
+	object_tracking_service_ = this->create_service<ObjectTrackingService>(
+    "object_tracking",
+    [this](const std::shared_ptr<ObjectTrackingRequest> request,
+           std::shared_ptr<ObjectTrackingResponse> response) {
+        this->handle_msgs(request, response);
+    });
+
+	auto timer_callback =
+      [this]() -> void {
+        this->update_pose();
+      };
+    timer_ = this->create_wall_timer(std::chrono::milliseconds(200), timer_callback); //todo: call it as subscription of yolo output
+}
+
+void ObjectTrackingServer::init()
 {
 	//get camera params (later todo: make it parameterizable)
 	camera_width_     = 480;
@@ -36,31 +56,39 @@ void init()
 	past_responses_.clear();
 
 	puck_height_ = 0.025;
+
+	tracking_active_ = false;
 }
 
-void compute_pose(const std::shared_ptr<ObjectTrackingRequest> request,
+void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingRequest> request,
           std::shared_ptr<ObjectTrackingResponse> response)
 {
+	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes yes");
 	if(request->enable){
 		//sanity checks
 		if(request->object_type != "WORKPIECE" &&
 		   request->object_type != "CONVEYOR" &&
 		   request->object_type != "SLIDE"){
 			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Object type: %s unknown!", request->object_type.c_str());
+			tracking_active_ = false;
 			response->error = "Invalid Request Parameter";
 			response->success = false;
 			return;
 		} else if(request->distance_threshold < 0){
 			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Negative distance threshold: %f", request->distance_threshold);
+			tracking_active_ = false;
 			response->error = "Invalid Request Parameter";
 			response->success = false;
 			return;
 		}
-	//todo: check if laserline and yolo is updating
+	//todo: toggle yolo on
+	//todo: toggle laser-line + object_estimation_updates based on that on
+	//later todo: also check if yolo is updating?
 
 	response->success = true;
 	} else {
-		//todo: stop spinning node
+		//todo: toggle yolo off
+		//todo: toggle laser-line + object_estimation_updates based on that off
 		response->success = true;
 		return;
 	}
@@ -68,8 +96,16 @@ void compute_pose(const std::shared_ptr<ObjectTrackingRequest> request,
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Incoming request: \nobject_type: %s \nreference_frame: %s \ndistance_threshold: %f \nobject_tf_name: %s",
                 request->object_type.c_str(), request->reference_frame.c_str(), request->distance_threshold, request->object_tf_name.c_str());
 
+	tracking_active_ = true;
 	current_object_type_ = request->object_type;
+	current_reference_frame_ = request->reference_frame;
+	current_distance_threshold_ = request->distance_threshold;
+	current_object_tf_name_ = request->object_tf_name;
+}
 
+void ObjectTrackingServer::update_pose()
+{
+	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "update");
 	//todo: get angle of target MPS (though 6D tf pose)
 	float mps_angle = 0;
 
@@ -77,7 +113,7 @@ void compute_pose(const std::shared_ptr<ObjectTrackingRequest> request,
 	std::vector<std::array<float, 4>> bounding_boxes = {{0.5, 0.2, 0.3, 0.1}};
 
 	float cur_object_pos_target[3];
-	bool detected = closest_position(bounding_boxes, mps_angle, request->reference_frame, request->distance_threshold, cur_object_pos_target);
+	bool detected = closest_position(bounding_boxes, mps_angle, current_reference_frame_, current_distance_threshold_, cur_object_pos_target);
 
 	if(!detected) return;
 
@@ -153,7 +189,7 @@ void compute_pose(const std::shared_ptr<ObjectTrackingRequest> request,
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes");
 }
 
-bool closest_position(std::vector<std::array<float, 4>>      bounding_boxes,
+bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>      bounding_boxes,
                                        float                 mps_angle,
                                        std::string           reference_frame,
                                        float                 distance_threshold,
@@ -183,7 +219,7 @@ bool closest_position(std::vector<std::array<float, 4>>      bounding_boxes,
 	return min_dist < distance_threshold;
 }
 
-void project_3d_point(std::array<float, 4> bounding_box, float mps_angle, float point[3])
+void ObjectTrackingServer::project_3d_point(std::array<float, 4> bounding_box, float mps_angle, float point[3])
 {
 	//compute bounding box values
 	float bb_left    = bounding_box[0] - bounding_box[2] / 2;
@@ -239,16 +275,7 @@ void project_3d_point(std::array<float, 4> bounding_box, float mps_angle, float 
 int main(int argc, char **argv)
 {
 	rclcpp::init(argc, argv);
-
-	init();
-
-	std::shared_ptr<rclcpp::Node> node = rclcpp::Node::make_shared("object_tracking_server");
-
-	rclcpp::Service<ObjectTrackingService>::SharedPtr service =
-    node->create_service<ObjectTrackingService>("object_tracking", &compute_pose);
-
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Ready to update object poses.");
-
-	rclcpp::spin(node);
+	rclcpp::spin(std::make_shared<ObjectTrackingServer>());
 	rclcpp::shutdown();
+	return 0;
 }
