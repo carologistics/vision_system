@@ -2,11 +2,14 @@
 #include "rclcpp/rclcpp.hpp"
 #include "object_tracking/object_tracking.hpp"
 #include "robotino_vision_msgs/srv/toggle_object_tracking.hpp"
-
 #include "geometry_msgs/msg/transform_stamped.hpp"
-#include "rclcpp/rclcpp.hpp"
+#include <geometry_msgs/msg/quaternion.hpp>
+
 #include "tf2/LinearMath/Quaternion.h"
-#include "tf2_ros/static_transform_broadcaster.h"
+#include "tf2_ros/transform_broadcaster.h"
+#include "tf2_ros/buffer.h"
+#include "tf2/utils.h"
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <memory>
 
@@ -15,6 +18,7 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes");
 	this->init();
 
+	// create service
 	object_tracking_service_ = this->create_service<ObjectTrackingService>(
     "object_tracking",
     [this](const std::shared_ptr<ObjectTrackingRequest> request,
@@ -22,6 +26,14 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
         this->handle_msgs(request, response);
     });
 
+    tf_buffer_ =
+      std::make_unique<tf2_ros::Buffer>(this->get_clock());
+
+	// create tf broadcaster
+    tf_broadcaster_ =
+      std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+
+	//todo: call update_pose for every time YOLO outputs something
 	auto timer_callback =
       [this]() -> void {
         this->update_pose();
@@ -31,7 +43,7 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 
 void ObjectTrackingServer::init()
 {
-	//get camera params (later todo: make it parameterizable)
+	// get camera params (later todo: make it parameterizable)
 	camera_width_     = 480;
 	camera_height_    = 640;
 	camera_ppx_       = 251.00801023972;
@@ -39,11 +51,11 @@ void ObjectTrackingServer::init()
 	camera_fy_        = 634.6348457656962;
 	camera_fx_        = 642.6147379302428;
 
-	//set object params
+	// set object params
 	//               {Conveyor, Slide, Workpiece}
 	object_widths_ = {0.03, 0.0585, 0.04};
 
-	//set up weighted average filter
+	// set up weighted average filter
 	//-------------------------------------------------------------------------
 	filter_weights_[0] = 0.2; // current response
 	filter_weights_[1] = 0.2; // last response
@@ -65,7 +77,7 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 {
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes yes");
 	if(request->enable){
-		//sanity checks
+		// sanity checks
 		if(request->object_type != "WORKPIECE" &&
 		   request->object_type != "CONVEYOR" &&
 		   request->object_type != "SLIDE"){
@@ -106,8 +118,19 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 void ObjectTrackingServer::update_pose()
 {
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "update");
-	//todo: get angle of target MPS (though 6D tf pose)
-	float mps_angle = 0;
+
+	// get angle of target MPS (though 6D tf pose)
+	geometry_msgs::msg::TransformStamped t_mps;
+	try {
+		t_mps = tf_buffer_->lookupTransform(
+		current_reference_frame_,
+		"base",
+		tf2::TimePointZero); // latest available time
+	} catch (const tf2::TransformException & ex) {
+		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", current_reference_frame_.c_str(), "expected_target_pose");
+		//return;
+	}
+	double mps_angle = tf2::getYaw(t_mps.transform.rotation);
 
 	//todo: get image bounding boxes
 	std::vector<std::array<float, 4>> bounding_boxes = {{0.5, 0.2, 0.3, 0.1}};
@@ -117,11 +140,11 @@ void ObjectTrackingServer::update_pose()
 
 	if(!detected) return;
 
-	//todo: transform cur_object_pos_target from cam_frame to odom
+	//1. todo: transform cur_object_pos_target from cam_frame to odom
 
 	//late todo: only show used bounding box in image and publish
 
-	//compute weighted average to improve robustness of object position
+	// compute weighted average to improve robustness of object position
 	double weighted_object_pos[3];
 	double sum_weights = 0;
 
@@ -132,7 +155,7 @@ void ObjectTrackingServer::update_pose()
 	
 
 	for (size_t i = 0; i < past_responses_.size(); i++) {
-		//todo: transform each past_response[i] to current time before adding
+		//late todo: transform each past_response[i] to current time before adding
 		weighted_object_pos[0] += filter_weights_[1 + i] * past_responses_[i].transform.translation.x;
 		weighted_object_pos[1] += filter_weights_[1 + i] * past_responses_[i].transform.translation.y;
 		weighted_object_pos[2] += filter_weights_[1 + i] * past_responses_[i].transform.translation.z;
@@ -146,8 +169,8 @@ void ObjectTrackingServer::update_pose()
 	geometry_msgs::msg::TransformStamped t;
 
 	t.header.stamp = this->get_clock()->now();
-	t.header.frame_id = "/odom";
-	t.child_frame_id = "target_object";
+	t.header.frame_id = "odom";
+	t.child_frame_id = "cur_target_object";
 
 	t.transform.translation.x = cur_object_pos_target[0];
 	t.transform.translation.y = cur_object_pos_target[1];
@@ -156,7 +179,7 @@ void ObjectTrackingServer::update_pose()
 	q.setRPY(
 	0,
 	0, 
-	0); //todo: add rotation depending on the mps yaw
+	mps_angle);
 	t.transform.rotation.x = q.x();
 	t.transform.rotation.y = q.y();
 	t.transform.rotation.z = q.z();
@@ -167,12 +190,12 @@ void ObjectTrackingServer::update_pose()
 		past_responses_.pop_back();
 	}
 
-	//todo: update tf
+	// update tf
 	geometry_msgs::msg::TransformStamped t_pub;
 
 	t_pub.header.stamp = this->get_clock()->now();
-	t_pub.header.frame_id = "/odom";
-	t_pub.child_frame_id = "target_object";
+	t_pub.header.frame_id = "odom";
+	t_pub.child_frame_id = current_object_tf_name_;
 
 	t_pub.transform.translation.x = weighted_object_pos[0];
 	t_pub.transform.translation.y = weighted_object_pos[1];
@@ -181,11 +204,14 @@ void ObjectTrackingServer::update_pose()
 	q_pub.setRPY(
 	0,
 	0, 
-	0); //todo: add rotation depending on the mps yaw
+	mps_angle);
 	t_pub.transform.rotation.x = q_pub.x();
 	t_pub.transform.rotation.y = q_pub.y();
 	t_pub.transform.rotation.z = q_pub.z();
 	t_pub.transform.rotation.w = q_pub.w();
+	
+    // Send the transformation
+    tf_broadcaster_->sendTransform(t_pub);
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes");
 }
 
@@ -197,16 +223,50 @@ bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>   
 {
 	float min_dist = distance_threshold;
 
-	//compute all poses of bounding boxes
+	// create transform from cam to expected pose
+	geometry_msgs::msg::TransformStamped t_ref;
+	try {
+		t_ref = tf_buffer_->lookupTransform(
+		current_reference_frame_,
+		"cam_frame",
+		tf2::TimePointZero); // latest available time
+	} catch (const tf2::TransformException & ex) {
+		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", current_reference_frame_.c_str());
+		//return false;
+	}
+
+	// compute all poses of bounding boxes
 	for (size_t i = 0; i < bounding_boxes.size(); ++i) {
 		float pos[3];
 		project_3d_point(bounding_boxes[i], mps_angle, pos);
 
-		//compare with reference frame
-		//todo: transform to reference_frame
+		// compare with reference frame
+		geometry_msgs::msg::TransformStamped t_pos;
 
-		//check distance to expected pose
-		float dist = sqrt(pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]);
+		t_pos.header.stamp = this->get_clock()->now(); //todo: change to stamp from YOLO
+		t_pos.header.frame_id = "cam_frame";
+		t_pos.child_frame_id = "potential_object_pos";
+
+		t_pos.transform.translation.x = pos[0];
+		t_pos.transform.translation.y = pos[1];
+		t_pos.transform.translation.z = pos[2];
+		tf2::Quaternion q_pos;
+		q_pos.setRPY(
+		0,
+		0, 
+		mps_angle);
+		t_pos.transform.rotation.x = q_pos.x();
+		t_pos.transform.rotation.y = q_pos.y();
+		t_pos.transform.rotation.z = q_pos.z();
+		t_pos.transform.rotation.w = q_pos.w();
+
+		geometry_msgs::msg::TransformStamped t_diff;
+		tf2::doTransform(t_pos, t_diff, t_ref);
+
+		// check distance to expected pose
+		float dist = sqrt(t_diff.transform.translation.x * t_diff.transform.translation.x +
+		                  t_diff.transform.translation.y * t_diff.transform.translation.y +
+						  t_diff.transform.translation.z * t_diff.transform.translation.z);
 		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "dist: %f", dist);
 		if (dist < min_dist) {
 			min_dist          = dist;
@@ -221,7 +281,7 @@ bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>   
 
 void ObjectTrackingServer::project_3d_point(std::array<float, 4> bounding_box, float mps_angle, float point[3])
 {
-	//compute bounding box values
+	// compute bounding box values
 	float bb_left    = bounding_box[0] - bounding_box[2] / 2;
 	float bb_right   = bounding_box[0] + bounding_box[2] / 2;
 	float bb_bottom  = bounding_box[1] - bounding_box[3] / 2;
@@ -251,21 +311,21 @@ void ObjectTrackingServer::project_3d_point(std::array<float, 4> bounding_box, f
 
 	float angle = mps_angle;
 
-	//workpiece angles depend only on the camera view and not the mps
+	// workpiece angles depend only on the camera view and not the mps
 	if (current_object_type_ == "WORKPIECE") {
 		angle = atan((dx_right + dx_left) / 2);
 	}
 
-	//distance towards object center point
+	// distance towards object center point
 	float dist = ((cos(angle) + sin(angle) * dx_left) * object_width) / (dx_right - dx_left)
 	             + sin(angle) * object_width / 2;
 
-	//compute middle point with deltas and distance
+	// compute middle point with deltas and distance
 	point[0] = dist;
 	point[1] = -(dx_left + dx_right) * dist / 2;
 
 	if (current_object_type_ == "WORKPIECE") {
-		//compute base middle point using the bottom point + wp_height/2
+		// compute base middle point using the bottom point + wp_height/2
 		point[2] = dy_bottom * dist + puck_height_ / 2;
 	} else {
 		point[2] = dy_center * dist;
