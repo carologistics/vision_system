@@ -124,10 +124,10 @@ void ObjectTrackingServer::update_pose()
 	try {
 		t_mps = tf_buffer_->lookupTransform(
 		current_reference_frame_,
-		"base",
+		"base_link",
 		tf2::TimePointZero); // latest available time
 	} catch (const tf2::TransformException & ex) {
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", current_reference_frame_.c_str(), "expected_target_pose");
+		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", current_reference_frame_.c_str(), "base_link");
 		//return;
 	}
 	double mps_angle = tf2::getYaw(t_mps.transform.rotation);
@@ -140,7 +140,40 @@ void ObjectTrackingServer::update_pose()
 
 	if(!detected) return;
 
-	//1. todo: transform cur_object_pos_target from cam_frame to odom
+	// create transform from cam to odom
+	geometry_msgs::msg::TransformStamped t_odom;
+	try {
+		t_odom = tf_buffer_->lookupTransform(
+		"odom",
+		"cam_frame",
+		tf2::TimePointZero); // latest available time
+	} catch (const tf2::TransformException & ex) {
+		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", "odom");
+		//return false;
+	}
+
+	// transform cur_object_pos_target from cam_frame to odom
+	geometry_msgs::msg::TransformStamped t_cam;
+
+	t_cam.header.stamp = this->get_clock()->now(); //todo: get from yolo
+	t_cam.header.frame_id = "cam_frame";
+	t_cam.child_frame_id = "cur_target_object";
+
+	t_cam.transform.translation.x = cur_object_pos_target[0];
+	t_cam.transform.translation.y = cur_object_pos_target[1];
+	t_cam.transform.translation.z = cur_object_pos_target[2];
+	tf2::Quaternion q;
+	q.setRPY(
+	0,
+	0, 
+	mps_angle);
+	t_cam.transform.rotation.x = q.x();
+	t_cam.transform.rotation.y = q.y();
+	t_cam.transform.rotation.z = q.z();
+	t_cam.transform.rotation.w = q.w();
+
+	geometry_msgs::msg::TransformStamped t_current_detection;
+	tf2::doTransform(t_cam, t_current_detection, t_odom);
 
 	//late todo: only show used bounding box in image and publish
 
@@ -148,9 +181,9 @@ void ObjectTrackingServer::update_pose()
 	double weighted_object_pos[3];
 	double sum_weights = 0;
 
-	weighted_object_pos[0] = filter_weights_[0] * cur_object_pos_target[0];
-	weighted_object_pos[1] = filter_weights_[0] * cur_object_pos_target[1];
-	weighted_object_pos[2] = filter_weights_[0] * cur_object_pos_target[2];
+	weighted_object_pos[0] = filter_weights_[0] * t_current_detection.transform.translation.x;
+	weighted_object_pos[1] = filter_weights_[0] * t_current_detection.transform.translation.y;
+	weighted_object_pos[2] = filter_weights_[0] * t_current_detection.transform.translation.z;
 	sum_weights = filter_weights_[0];
 	
 
@@ -166,27 +199,8 @@ void ObjectTrackingServer::update_pose()
 	weighted_object_pos[1] /= sum_weights;
 	weighted_object_pos[2] /= sum_weights;
 
-	geometry_msgs::msg::TransformStamped t;
-
-	t.header.stamp = this->get_clock()->now();
-	t.header.frame_id = "odom";
-	t.child_frame_id = "cur_target_object";
-
-	t.transform.translation.x = cur_object_pos_target[0];
-	t.transform.translation.y = cur_object_pos_target[1];
-	t.transform.translation.z = cur_object_pos_target[2];
-	tf2::Quaternion q;
-	q.setRPY(
-	0,
-	0, 
-	mps_angle);
-	t.transform.rotation.x = q.x();
-	t.transform.rotation.y = q.y();
-	t.transform.rotation.z = q.z();
-	t.transform.rotation.w = q.w();
-
-	past_responses_.push_front(t);
-	if (past_responses_.size() == filter_size_) {
+	past_responses_.push_front(t_current_detection);
+	if (static_cast<int>(past_responses_.size()) == filter_size_) {
 		past_responses_.pop_back();
 	}
 
@@ -227,11 +241,11 @@ bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>   
 	geometry_msgs::msg::TransformStamped t_ref;
 	try {
 		t_ref = tf_buffer_->lookupTransform(
-		current_reference_frame_,
+		reference_frame,
 		"cam_frame",
 		tf2::TimePointZero); // latest available time
 	} catch (const tf2::TransformException & ex) {
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", current_reference_frame_.c_str());
+		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", reference_frame.c_str());
 		//return false;
 	}
 
