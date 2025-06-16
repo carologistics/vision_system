@@ -26,19 +26,25 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
         this->handle_msgs(request, response);
     });
 
+	// create buffer for pose publisher
     tf_buffer_ =
       std::make_unique<tf2_ros::Buffer>(this->get_clock());
+
+	// create yolo starting publisher
+    yolo_publisher_ = this->create_publisher<picam_client::srv::StreamControl>("/picam_client/stream_control", 10);
 
 	// create tf broadcaster
     tf_broadcaster_ =
       std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-	//todo: call update_pose for every time YOLO outputs something
-	auto timer_callback =
-      [this]() -> void {
-        this->update_pose();
-      };
-    timer_ = this->create_wall_timer(std::chrono::milliseconds(200), timer_callback); //todo: call it as subscription of yolo output
+	// call update_pose for every time YOLO outputs something
+    auto yolo_callback =
+      [this](vision_msgs::msg::Detection2DArray yolo_output) {
+        yolo_detections_ = yolo_output;
+		this->update_pose();
+    };
+    yolo_subscription_ =
+      this->create_subscription<vision_msgs::msg::Detection2DArray>("detections", 10, yolo_callback);
 }
 
 void ObjectTrackingServer::init()
@@ -93,7 +99,19 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 			response->success = false;
 			return;
 		}
-	//todo: toggle yolo on
+	// create yolo message
+    auto start_yolo_message = picam_client::srv::StreamControl::Request();
+
+	if(request->object_type == "WORKPIECE"){
+		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_WORKPIECE;
+	} else if(request->object_type == "CONVEYOR"){
+		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_CONVEYOR;
+	} else if(request->object_type == "SLIDE"){
+		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_SLIDE;
+	}
+	// toggle yolo
+	this->yolo_publisher_->publish(start_yolo_message);
+
 	//todo: toggle laser-line + object_estimation_updates based on that on
 	//later todo: also check if yolo is updating?
 
@@ -132,11 +150,8 @@ void ObjectTrackingServer::update_pose()
 	}
 	double mps_angle = tf2::getYaw(t_mps.transform.rotation);
 
-	//todo: get image bounding boxes
-	std::vector<std::array<float, 4>> bounding_boxes = {{0.5, 0.2, 0.3, 0.1}};
-
 	float cur_object_pos_target[3];
-	bool detected = closest_position(bounding_boxes, mps_angle, current_reference_frame_, current_distance_threshold_, cur_object_pos_target);
+	bool detected = closest_position(yolo_detections_, mps_angle, current_reference_frame_, current_distance_threshold_, cur_object_pos_target);
 
 	if(!detected) return;
 
@@ -229,7 +244,7 @@ void ObjectTrackingServer::update_pose()
 	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes");
 }
 
-bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>      bounding_boxes,
+bool ObjectTrackingServer::closest_position(vision_msgs::msg::Detection2DArray      yolo_detections,
                                        float                 mps_angle,
                                        std::string           reference_frame,
                                        float                 distance_threshold,
@@ -250,9 +265,9 @@ bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>   
 	}
 
 	// compute all poses of bounding boxes
-	for (size_t i = 0; i < bounding_boxes.size(); ++i) {
+	for (size_t i = 0; i < yolo_detections.detections.size(); ++i) {
 		float pos[3];
-		project_3d_point(bounding_boxes[i], mps_angle, pos);
+		project_3d_point(yolo_detections.detections[i].bbox, mps_angle, pos);
 
 		// compare with reference frame
 		geometry_msgs::msg::TransformStamped t_pos;
@@ -293,14 +308,14 @@ bool ObjectTrackingServer::closest_position(std::vector<std::array<float, 4>>   
 	return min_dist < distance_threshold;
 }
 
-void ObjectTrackingServer::project_3d_point(std::array<float, 4> bounding_box, float mps_angle, float point[3])
+void ObjectTrackingServer::project_3d_point(vision_msgs::msg::BoundingBox2D bounding_box, float mps_angle, float point[3])
 {
 	// compute bounding box values
-	float bb_left    = bounding_box[0] - bounding_box[2] / 2;
-	float bb_right   = bounding_box[0] + bounding_box[2] / 2;
-	float bb_bottom  = bounding_box[1] - bounding_box[3] / 2;
-	//float bb_top     = bounding_box[1] + bounding_box[3] / 2;
-	float bb_centerY = bounding_box[1];
+	float bb_left    = bounding_box.center.position.x - bounding_box.size_x / 2;
+	float bb_right   = bounding_box.center.position.x + bounding_box.size_x / 2;
+	float bb_bottom  = bounding_box.center.position.y - bounding_box.size_y / 2;
+	//float bb_top     = bounding_box.center.position.y + bounding_box.size_y / 2;
+	float bb_centerY = bounding_box.center.position.y;
 
 	//delta values:
 	float dx_left   = (bb_left * camera_width_ - camera_ppx_) / camera_fx_;

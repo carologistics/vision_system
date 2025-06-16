@@ -13,6 +13,8 @@ find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(picam_client REQUIRED)
+find_package(vision_msgs REQUIRED)
 
 
 add_executable(object_tracking src/object_tracking.cpp)
@@ -28,6 +30,8 @@ ament_target_dependencies(object_tracking
    tf2
    tf2_ros
    tf2_geometry_msgs
+   picam_client
+   vision_msgs
 )
 
 install(TARGETS object_tracking
