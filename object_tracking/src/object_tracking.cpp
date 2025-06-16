@@ -112,13 +112,15 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 	// toggle yolo
 	this->yolo_publisher_->publish(start_yolo_message);
 
-	//todo: toggle laser-line + object_estimation_updates based on that on
-	//later todo: also check if yolo is updating?
+	//todo: toggle laser-line / expected pose estimation on
 
 	response->success = true;
 	} else {
-		//todo: toggle yolo off
-		//todo: toggle laser-line + object_estimation_updates based on that off
+		// create yolo message
+		auto end_yolo_message = picam_client::srv::StreamControl::Request();
+		end_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_OFF_DETECTION;
+
+		//todo: toggle laser-line / expected pose estimation off
 		response->success = true;
 		return;
 	}
@@ -143,7 +145,7 @@ void ObjectTrackingServer::update_pose()
 		t_mps = tf_buffer_->lookupTransform(
 		current_reference_frame_,
 		"base_link",
-		tf2::TimePointZero); // latest available time
+		yolo_detections_.header.stamp);
 	} catch (const tf2::TransformException & ex) {
 		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", current_reference_frame_.c_str(), "base_link");
 		//return;
@@ -161,7 +163,7 @@ void ObjectTrackingServer::update_pose()
 		t_odom = tf_buffer_->lookupTransform(
 		"odom",
 		"cam_frame",
-		tf2::TimePointZero); // latest available time
+		yolo_detections_.header.stamp);
 	} catch (const tf2::TransformException & ex) {
 		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", "odom");
 		//return false;
@@ -170,7 +172,7 @@ void ObjectTrackingServer::update_pose()
 	// transform cur_object_pos_target from cam_frame to odom
 	geometry_msgs::msg::TransformStamped t_cam;
 
-	t_cam.header.stamp = this->get_clock()->now(); //todo: get from yolo
+	t_cam.header.stamp = yolo_detections_.header.stamp;
 	t_cam.header.frame_id = "cam_frame";
 	t_cam.child_frame_id = "cur_target_object";
 
@@ -203,7 +205,7 @@ void ObjectTrackingServer::update_pose()
 	
 
 	for (size_t i = 0; i < past_responses_.size(); i++) {
-		//late todo: transform each past_response[i] to current time before adding
+		//late todo: transform each past_response[i] to current time before adding (shouldn't matter, since odom is static)
 		weighted_object_pos[0] += filter_weights_[1 + i] * past_responses_[i].transform.translation.x;
 		weighted_object_pos[1] += filter_weights_[1 + i] * past_responses_[i].transform.translation.y;
 		weighted_object_pos[2] += filter_weights_[1 + i] * past_responses_[i].transform.translation.z;
@@ -222,7 +224,7 @@ void ObjectTrackingServer::update_pose()
 	// update tf
 	geometry_msgs::msg::TransformStamped t_pub;
 
-	t_pub.header.stamp = this->get_clock()->now();
+	t_pub.header.stamp = yolo_detections_.header.stamp;
 	t_pub.header.frame_id = "odom";
 	t_pub.child_frame_id = current_object_tf_name_;
 
@@ -272,7 +274,7 @@ bool ObjectTrackingServer::closest_position(vision_msgs::msg::Detection2DArray  
 		// compare with reference frame
 		geometry_msgs::msg::TransformStamped t_pos;
 
-		t_pos.header.stamp = this->get_clock()->now(); //todo: change to stamp from YOLO
+		t_pos.header.stamp = yolo_detections.header.stamp;
 		t_pos.header.frame_id = "cam_frame";
 		t_pos.child_frame_id = "potential_object_pos";
 
