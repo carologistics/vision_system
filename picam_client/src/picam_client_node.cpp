@@ -17,6 +17,7 @@
 #include <chrono>
 #include <cv_bridge/cv_bridge.hpp>
 #include <thread>
+#include <atomic>
 
 namespace picam_client {
 
@@ -71,22 +72,26 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   // Instead, start the read thread:
   read_thread_ = std::thread(&PicamClientNode::read_loop, this);
 
+  // Change should_exit_ to atomic
+  should_exit_.store(false);
+
   RCLCPP_INFO(get_logger(), "PiCam Client Node initialized");
   RCLCPP_INFO(get_logger(), "OpenCV version: %s", CV_VERSION);
 }
 
 PicamClientNode::~PicamClientNode() {
-  should_exit_ = true;
+  should_exit_.store(true);
   if (read_thread_.joinable()) {
     read_thread_.join();
   }
   if (sockfd_ >= 0) {
     close(sockfd_);
+    sockfd_ = -1;
   }
 }
 
 void PicamClientNode::read_loop() {
-  while (!should_exit_) {
+  while (!should_exit_.load()) {
     if (!connected_) {
       if (connect_to_server() < 0) {
         RCLCPP_ERROR(get_logger(), "Failed to connect, retrying...");
@@ -97,12 +102,33 @@ void PicamClientNode::read_loop() {
       connected_ = true;
     }
 
+    // Add timeout for socket operations
+    fd_set readfds;
+    struct timeval timeout;
+    FD_ZERO(&readfds);
+    FD_SET(sockfd_, &readfds);
+    timeout.tv_sec = 1;
+    timeout.tv_usec = 0;
+
+    int activity = select(sockfd_ + 1, &readfds, NULL, NULL, &timeout);
+    if (activity < 0) {
+      RCLCPP_ERROR(get_logger(), "Select error");
+      connected_ = false;
+      close(sockfd_);
+      sockfd_ = -1;
+      continue;
+    } else if (activity == 0) {
+      // Timeout - check should_exit_
+      continue;
+    }
+
     // Read incoming messages
     data_.resize(1);
     if (!receive_data(sockfd_, data_.data(), 1)) {
       RCLCPP_ERROR(get_logger(), "Connection lost");
       connected_ = false;
       close(sockfd_);
+      sockfd_ = -1;
       continue;
     }
 
@@ -124,11 +150,22 @@ void PicamClientNode::read_loop() {
 }
 
 int PicamClientNode::connect_to_server() {
+  if (sockfd_ >= 0) {
+    close(sockfd_);
+  }
+
   sockfd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd_ < 0) {
     RCLCPP_ERROR(get_logger(), "Socket creation error");
     return -1;
   }
+
+  // Set socket timeout
+  struct timeval timeout;
+  timeout.tv_sec = 5;
+  timeout.tv_usec = 0;
+  setsockopt(sockfd_, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  setsockopt(sockfd_, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
   server_addr_.sin_family = AF_INET;
   server_addr_.sin_port = htons(server_port_);
