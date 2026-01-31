@@ -15,7 +15,7 @@
 
 ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 {
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes");
+	RCLCPP_INFO(this->get_logger(), "Object tracking node starting...");
 	this->init();
 
 	// create service
@@ -40,60 +40,62 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 	// call update_pose for every time YOLO outputs something
     auto yolo_callback =
       [this](vision_msgs::msg::Detection2DArray yolo_output) {
+        if (!tracking_active_) return;
         yolo_detections_ = yolo_output;
 		this->update_pose();
     };
     yolo_subscription_ =
-      this->create_subscription<vision_msgs::msg::Detection2DArray>("detections", 10, yolo_callback);
+      this->create_subscription<vision_msgs::msg::Detection2DArray>("detections", rclcpp::SensorDataQoS(), yolo_callback);
 }
 
 void ObjectTrackingServer::init()
 {
-	// get camera params (later todo: make it parameterizable)
-	camera_width_     = 480;
-	camera_height_    = 640;
-	camera_ppx_       = 251.00801023972;
-	camera_ppy_       = 301.32794812152997;
-	camera_fy_        = 634.6348457656962;
-	camera_fx_        = 642.6147379302428;
+	// Helper to declare and get parameters strictly
+	auto get_param_strict = [this](const std::string & name, auto & variable) {
+		this->declare_parameter<typename std::remove_reference<decltype(variable)>::type>(name);
+		if (!this->get_parameter(name, variable)) {
+			RCLCPP_FATAL(this->get_logger(), "Parameter '%s' not set! Crashing node.", name.c_str());
+			throw std::runtime_error("Required parameter missing: " + name);
+		}
+	};
 
-	// set object params
-	//               {Conveyor, Slide, Workpiece}
-	object_widths_ = {0.03, 0.0585, 0.04};
+	get_param_strict("camera_width", camera_width_);
+	get_param_strict("camera_height", camera_height_);
+	get_param_strict("camera_ppx", camera_ppx_);
+	get_param_strict("camera_ppy", camera_ppy_);
+	get_param_strict("camera_fy", camera_fy_);
+	get_param_strict("camera_fx", camera_fx_);
+	get_param_strict("object_widths", object_widths_);
+	get_param_strict("puck_height", puck_height_);
 
-	// set up weighted average filter
-	//-------------------------------------------------------------------------
-	filter_weights_[0] = 0.2; // current response
-	filter_weights_[1] = 0.2; // last response
-	filter_weights_[2] = 0.2; // 2. last response
-	filter_weights_[3] = 0.2; // 3. last response
-	filter_weights_[4] = 0.2; // 4. last response
-	//-------------------------------------------------------------------------
-	filter_size_ = sizeof(filter_weights_) / sizeof(filter_weights_[0]);
+	std::vector<double> weights;
+	get_param_strict("filter_weights", weights);
+	
+	filter_size_ = std::min(static_cast<int>(weights.size()), 5); 
+	for (int i = 0; i < filter_size_; ++i) {
+		filter_weights_[i] = weights[i];
+	}
 
 	past_responses_.clear();
-
-	puck_height_ = 0.025;
-
 	tracking_active_ = false;
 }
 
 void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingRequest> request,
           std::shared_ptr<ObjectTrackingResponse> response)
 {
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes yes");
+	RCLCPP_INFO(this->get_logger(), "Handle control request");
 	if(request->enable){
 		// sanity checks
 		if(request->object_type != "WORKPIECE" &&
 		   request->object_type != "CONVEYOR" &&
 		   request->object_type != "SLIDE"){
-			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Object type: %s unknown!", request->object_type.c_str());
+			RCLCPP_ERROR(this->get_logger(), "Invalid Request Parameter! Object type: %s unknown!", request->object_type.c_str());
 			tracking_active_ = false;
 			response->error = "Invalid Request Parameter";
 			response->success = false;
 			return;
 		} else if(request->distance_threshold < 0){
-			RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Invalid Request Parameter! Negative distance threshold: %f", request->distance_threshold);
+			RCLCPP_ERROR(this->get_logger(), "Invalid Request Parameter! Negative distance threshold: %f", request->distance_threshold);
 			tracking_active_ = false;
 			response->error = "Invalid Request Parameter";
 			response->success = false;
@@ -125,7 +127,7 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 		return;
 	}
 
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Incoming request: \nobject_type: %s \nreference_frame: %s \ndistance_threshold: %f \nobject_tf_name: %s",
+	RCLCPP_INFO(this->get_logger(), "Incoming request: \nobject_type: %s \nreference_frame: %s \ndistance_threshold: %f \nobject_tf_name: %s",
                 request->object_type.c_str(), request->reference_frame.c_str(), request->distance_threshold, request->object_tf_name.c_str());
 
 	tracking_active_ = true;
@@ -137,7 +139,9 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 
 void ObjectTrackingServer::update_pose()
 {
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "update");
+	if (!tracking_active_) return;
+
+	RCLCPP_INFO(this->get_logger(), "update");
 
 	// get angle of target MPS (though 6D tf pose)
 	geometry_msgs::msg::TransformStamped t_mps;
@@ -145,10 +149,11 @@ void ObjectTrackingServer::update_pose()
 		t_mps = tf_buffer_->lookupTransform(
 		current_reference_frame_,
 		"base_link",
-		yolo_detections_.header.stamp);
+		yolo_detections_.header.stamp,
+		std::chrono::milliseconds(20));
 	} catch (const tf2::TransformException & ex) {
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", current_reference_frame_.c_str(), "base_link");
-		//return;
+		RCLCPP_WARN(this->get_logger(), "Could not transform %s to base_link: %s", current_reference_frame_.c_str(), ex.what());
+		return;
 	}
 	double mps_angle = tf2::getYaw(t_mps.transform.rotation);
 
@@ -163,10 +168,11 @@ void ObjectTrackingServer::update_pose()
 		t_odom = tf_buffer_->lookupTransform(
 		"odom",
 		"cam_frame",
-		yolo_detections_.header.stamp);
+		yolo_detections_.header.stamp,
+		std::chrono::milliseconds(20));
 	} catch (const tf2::TransformException & ex) {
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", "odom");
-		//return false;
+		RCLCPP_WARN(this->get_logger(), "Could not transform cam_frame to odom: %s", ex.what());
+		return;
 	}
 
 	// transform cur_object_pos_target from cam_frame to odom
@@ -243,7 +249,7 @@ void ObjectTrackingServer::update_pose()
 	
     // Send the transformation
     tf_broadcaster_->sendTransform(t_pub);
-	RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "yes yes");
+	RCLCPP_INFO(this->get_logger(), "yes yes");
 }
 
 bool ObjectTrackingServer::closest_position(vision_msgs::msg::Detection2DArray      yolo_detections,
@@ -260,10 +266,11 @@ bool ObjectTrackingServer::closest_position(vision_msgs::msg::Detection2DArray  
 		t_ref = tf_buffer_->lookupTransform(
 		reference_frame,
 		"cam_frame",
-		tf2::TimePointZero); // latest available time
+		yolo_detections_.header.stamp,
+		std::chrono::milliseconds(20));
 	} catch (const tf2::TransformException & ex) {
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Transform Exception! Not possible to transform from %s to %s", "cam_frame", reference_frame.c_str());
-		//return false;
+		RCLCPP_WARN(this->get_logger(), "Lookup failed for tracking reference: %s", ex.what());
+		return false;
 	}
 
 	// compute all poses of bounding boxes
@@ -298,7 +305,7 @@ bool ObjectTrackingServer::closest_position(vision_msgs::msg::Detection2DArray  
 		float dist = sqrt(t_diff.transform.translation.x * t_diff.transform.translation.x +
 		                  t_diff.transform.translation.y * t_diff.transform.translation.y +
 						  t_diff.transform.translation.z * t_diff.transform.translation.z);
-		RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "dist: %f", dist);
+		RCLCPP_INFO(this->get_logger(), "dist: %f", dist);
 		if (dist < min_dist) {
 			min_dist          = dist;
 			closest_pos[0]    = pos[0];
@@ -327,7 +334,7 @@ void ObjectTrackingServer::project_3d_point(vision_msgs::msg::BoundingBox2D boun
 	float dy_center = (bb_centerY * camera_height_ - camera_ppy_) / camera_fy_;
 
 	if (dx_left >= dx_right) {
-    RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Width of 0: Cannot project into 3D space!");
+    RCLCPP_INFO(this->get_logger(), "Width of 0: Cannot project into 3D space!");
 		point[0] = 0;
 		point[1] = 0;
 		point[2] = 0;
@@ -338,7 +345,7 @@ void ObjectTrackingServer::project_3d_point(vision_msgs::msg::BoundingBox2D boun
 	if(current_object_type_ == "CONVEYOR") object_width = object_widths_[0];
 	else if(current_object_type_ == "SLIDE") object_width = object_widths_[1];
 	else if(current_object_type_ == "WORKPIECE") object_width = object_widths_[2];
-	else RCLCPP_INFO(rclcpp::get_logger("rclcpp"), "Unknown object_type!");
+	else RCLCPP_INFO(this->get_logger(), "Unknown object_type!");
 
 	float angle = mps_angle;
 
