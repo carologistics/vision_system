@@ -30,8 +30,8 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
     tf_buffer_ =
       std::make_unique<tf2_ros::Buffer>(this->get_clock());
 
-	// create yolo starting publisher
-    yolo_publisher_ = this->create_publisher<picam_client::srv::StreamControl>("/picam_client/stream_control", 10);
+	// create yolo service client instead of publisher
+    yolo_client_ = this->create_client<picam_client::srv::StreamControl>("/picam_client/stream_control");
 
 	// create tf broadcaster
     tf_broadcaster_ =
@@ -101,27 +101,38 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 			response->success = false;
 			return;
 		}
-	// create yolo message
-    auto start_yolo_message = picam_client::srv::StreamControl::Request();
+	// create yolo request
+    auto start_yolo_request = std::make_shared<picam_client::srv::StreamControl::Request>();
 
 	if(request->object_type == "WORKPIECE"){
-		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_WORKPIECE;
+		start_yolo_request->command = picam_client::srv::StreamControl::Request::SWITCH_TO_WORKPIECE;
 	} else if(request->object_type == "CONVEYOR"){
-		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_CONVEYOR;
+		start_yolo_request->command = picam_client::srv::StreamControl::Request::SWITCH_TO_CONVEYOR;
 	} else if(request->object_type == "SLIDE"){
-		start_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_TO_SLIDE;
+		start_yolo_request->command = picam_client::srv::StreamControl::Request::SWITCH_TO_SLIDE;
 	}
-	// toggle yolo
-	this->yolo_publisher_->publish(start_yolo_message);
+	
+	// call yolo service instead of publishing
+	if (!yolo_client_->wait_for_service(std::chrono::seconds(1))) {
+		RCLCPP_ERROR(this->get_logger(), "Service not available");
+		response->success = false;
+		response->error = "Yolo service not available";
+		return;
+	}
+	
+	auto future = yolo_client_->async_send_request(start_yolo_request);
+	// You may want to handle the response asynchronously or wait for it
 
 	//todo: toggle laser-line / expected pose estimation on
 
 	response->success = true;
 	} else {
-		// create yolo message
-		auto end_yolo_message = picam_client::srv::StreamControl::Request();
-		end_yolo_message.command = picam_client::srv::StreamControl::Request::SWITCH_OFF_DETECTION;
-
+		// create yolo request for stopping
+		auto end_yolo_request = std::make_shared<picam_client::srv::StreamControl::Request>();
+		end_yolo_request->command = picam_client::srv::StreamControl::Request::SWITCH_OFF_DETECTION;
+		
+		auto future = yolo_client_->async_send_request(end_yolo_request);
+		
 		//todo: toggle laser-line / expected pose estimation off
 		response->success = true;
 		return;
