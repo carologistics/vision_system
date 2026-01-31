@@ -198,29 +198,48 @@ void ObjectTrackingServer::update_pose()
 	geometry_msgs::msg::TransformStamped t_current_detection;
 	tf2::doTransform(t_cam, t_current_detection, t_odom);
 
-	//late todo: only show used bounding box in image and publish
+	// Estimate distance from camera to object for precision weighting
+	double dist_to_cam = std::sqrt(std::pow(cur_object_pos_target[0], 2) + 
+	                               std::pow(cur_object_pos_target[1], 2));
+	
+	// Weight is inversely proportional to distance (closer is better)
+	// We also combine it with your existing filter weights
+	double current_weight = filter_weights_[0] * (1.0 / std::max(dist_to_cam, 0.1));
 
-	// compute weighted average to improve robustness of object position
-	double weighted_object_pos[3];
+	// compute weighted average
+	double weighted_pos[3] = {0, 0, 0};
 	double sum_weights = 0;
 
-	weighted_object_pos[0] = filter_weights_[0] * t_current_detection.transform.translation.x;
-	weighted_object_pos[1] = filter_weights_[0] * t_current_detection.transform.translation.y;
-	weighted_object_pos[2] = filter_weights_[0] * t_current_detection.transform.translation.z;
-	sum_weights = filter_weights_[0];
-	
+	// Add current detection
+	weighted_pos[0] = current_weight * t_current_detection.transform.translation.x;
+	weighted_pos[1] = current_weight * t_current_detection.transform.translation.y;
+	weighted_pos[2] = current_weight * t_current_detection.transform.translation.z;
+	sum_weights = current_weight;
 
+	// Add past detections (ideally store distance with past responses for better weighting)
 	for (size_t i = 0; i < past_responses_.size(); i++) {
-		//late todo: transform each past_response[i] to current time before adding (shouldn't matter, since odom is static)
-		weighted_object_pos[0] += filter_weights_[1 + i] * past_responses_[i].transform.translation.x;
-		weighted_object_pos[1] += filter_weights_[1 + i] * past_responses_[i].transform.translation.y;
-		weighted_object_pos[2] += filter_weights_[1 + i] * past_responses_[i].transform.translation.z;
-		sum_weights += filter_weights_[1 + i];
+		// For simplicity, we use the original weights here, 
+		// but you could store a struct {transform, distance} in past_responses_
+		double w = filter_weights_[i + 1];
+		weighted_pos[0] += w * past_responses_[i].transform.translation.x;
+		weighted_pos[1] += w * past_responses_[i].transform.translation.y;
+		weighted_pos[2] += w * past_responses_[i].transform.translation.z;
+		sum_weights += w;
 	}
 
-	weighted_object_pos[0] /= sum_weights;
-	weighted_object_pos[1] /= sum_weights;
-	weighted_object_pos[2] /= sum_weights;
+	weighted_pos[0] /= sum_weights;
+	weighted_pos[1] /= sum_weights;
+	weighted_pos[2] /= sum_weights;
+
+	// Simple outlier rejection: if the new detection is > 20cm from the average, be cautious
+	if (past_responses_.size() > 2) {
+		double diff = std::sqrt(std::pow(weighted_pos[0] - t_current_detection.transform.translation.x, 2) +
+		                        std::pow(weighted_pos[1] - t_current_detection.transform.translation.y, 2));
+		if (diff > 0.2) {
+			RCLCPP_WARN(this->get_logger(), "Detection outlier ignored (diff: %f)", diff);
+			return;
+		}
+	}
 
 	past_responses_.push_front(t_current_detection);
 	if (static_cast<int>(past_responses_.size()) == filter_size_) {
@@ -234,9 +253,9 @@ void ObjectTrackingServer::update_pose()
 	t_pub.header.frame_id = "odom";
 	t_pub.child_frame_id = current_object_tf_name_;
 
-	t_pub.transform.translation.x = weighted_object_pos[0];
-	t_pub.transform.translation.y = weighted_object_pos[1];
-	t_pub.transform.translation.z = weighted_object_pos[2];
+	t_pub.transform.translation.x = weighted_pos[0];
+	t_pub.transform.translation.y = weighted_pos[1];
+	t_pub.transform.translation.z = weighted_pos[2];
 	tf2::Quaternion q_pub;
 	q_pub.setRPY(
 	0,
