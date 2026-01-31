@@ -16,6 +16,13 @@
 ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 {
 	RCLCPP_INFO(this->get_logger(), "Object tracking node starting...");
+	
+	// create yolo service client
+    yolo_client_ = this->create_client<picam_client::srv::StreamControl>("/picam_client/stream_control");
+    
+    // create camera info client
+    camera_info_client_ = this->create_client<sensor_msgs::srv::GetCameraInfo>("/picam_client/get_camera_info");
+
 	this->init();
 
 	// create service
@@ -50,7 +57,13 @@ ObjectTrackingServer::ObjectTrackingServer() : Node("object_tracking_server")
 
 void ObjectTrackingServer::init()
 {
-	// Helper to declare and get parameters strictly
+	// Get camera parameters from picam_client
+	if (!get_camera_parameters()) {
+		RCLCPP_FATAL(this->get_logger(), "Failed to get camera parameters from picam_client!");
+		throw std::runtime_error("Cannot get camera parameters");
+	}
+
+	// Helper to declare and get parameters strictly (only for non-camera params)
 	auto get_param_strict = [this](const std::string & name, auto & variable) {
 		this->declare_parameter<typename std::remove_reference<decltype(variable)>::type>(name);
 		if (!this->get_parameter(name, variable)) {
@@ -59,12 +72,7 @@ void ObjectTrackingServer::init()
 		}
 	};
 
-	get_param_strict("camera_width", camera_width_);
-	get_param_strict("camera_height", camera_height_);
-	get_param_strict("camera_ppx", camera_ppx_);
-	get_param_strict("camera_ppy", camera_ppy_);
-	get_param_strict("camera_fy", camera_fy_);
-	get_param_strict("camera_fx", camera_fx_);
+	// Only get non-camera parameters from config
 	get_param_strict("object_widths", object_widths_);
 	get_param_strict("puck_height", puck_height_);
 
@@ -78,6 +86,44 @@ void ObjectTrackingServer::init()
 
 	past_responses_.clear();
 	tracking_active_ = false;
+}
+
+bool ObjectTrackingServer::get_camera_parameters() {
+	// Wait for camera info service
+	if (!camera_info_client_->wait_for_service(std::chrono::seconds(10))) {
+		RCLCPP_ERROR(this->get_logger(), "Camera info service not available");
+		return false;
+	}
+
+	// Request camera parameters
+	auto request = std::make_shared<sensor_msgs::srv::GetCameraInfo::Request>();
+	auto future = camera_info_client_->async_send_request(request);
+	
+	// Wait for response
+	if (rclcpp::spin_until_future_complete(this->get_node_base_interface(), future) != 
+	    rclcpp::FutureReturnCode::SUCCESS) {
+		RCLCPP_ERROR(this->get_logger(), "Failed to get camera info response");
+		return false;
+	}
+
+	auto response = future.get();
+	if (!response->success) {
+		RCLCPP_ERROR(this->get_logger(), "Camera info service returned error");
+		return false;
+	}
+
+	// Extract camera parameters
+	camera_width_ = response->camera_info.width;
+	camera_height_ = response->camera_info.height;
+	camera_fx_ = response->camera_info.k[0];  // fx
+	camera_ppx_ = response->camera_info.k[2]; // cx
+	camera_fy_ = response->camera_info.k[4];  // fy
+	camera_ppy_ = response->camera_info.k[5]; // cy
+
+	RCLCPP_INFO(this->get_logger(), "Got camera parameters: %dx%d, fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+	           camera_width_, camera_height_, camera_fx_, camera_fy_, camera_ppx_, camera_ppy_);
+
+	return true;
 }
 
 void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingRequest> request,

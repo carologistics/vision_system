@@ -57,6 +57,12 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
       std::bind(&PicamClientNode::handle_stream_control, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+  // Add camera info service
+  camera_info_srv_ = create_service<sensor_msgs::srv::GetCameraInfo>(
+      "/picam_client/get_camera_info",
+      std::bind(&PicamClientNode::handle_get_camera_info, this,
+                std::placeholders::_1, std::placeholders::_2));
+
   // After creating services, add debug logs
   RCLCPP_INFO(get_logger(), "Service '/set_confidence' created at: %s",
               set_confidence_srv_->get_service_name());
@@ -426,6 +432,29 @@ void PicamClientNode::handle_stream_control(
     response->message = "Unknown command";
     break;
   }
+}
+
+void PicamClientNode::handle_get_camera_info(
+    const std::shared_ptr<sensor_msgs::srv::GetCameraInfo::Request> /*request*/,
+    std::shared_ptr<sensor_msgs::srv::GetCameraInfo::Response> response) {
+  
+  response->camera_info.width = camera_width_;
+  response->camera_info.height = camera_height_;
+  
+  // Get camera matrix parameters
+  double old_f_x = get_parameter("camera_matrix.old_f_x").as_double();
+  double old_f_y = get_parameter("camera_matrix.old_f_y").as_double();
+  double old_ppx = get_parameter("camera_matrix.old_ppx").as_double();
+  double old_ppy = get_parameter("camera_matrix.old_ppy").as_double();
+  
+  // Fill camera matrix (3x3)
+  response->camera_info.k[0] = old_f_x;  // fx
+  response->camera_info.k[2] = old_ppx;  // cx
+  response->camera_info.k[4] = old_f_y;  // fy
+  response->camera_info.k[5] = old_ppy;  // cy
+  response->camera_info.k[8] = 1.0;      // 1
+  
+  response->success = true;
 }
 
 uint64_t PicamClientNode::ntohll(uint64_t val) {
