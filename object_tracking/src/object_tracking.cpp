@@ -169,8 +169,6 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 	auto future = yolo_client_->async_send_request(start_yolo_request);
 	// You may want to handle the response asynchronously or wait for it
 
-	//todo: toggle laser-line / expected pose estimation on
-
 	response->success = true;
 	} else {
 		// create yolo request for stopping
@@ -179,7 +177,6 @@ void ObjectTrackingServer::handle_msgs(const std::shared_ptr<ObjectTrackingReque
 		
 		auto future = yolo_client_->async_send_request(end_yolo_request);
 		
-		//todo: toggle laser-line / expected pose estimation off
 		response->success = true;
 		return;
 	}
