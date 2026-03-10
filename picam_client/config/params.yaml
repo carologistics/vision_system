@@ -4,6 +4,7 @@ picam_client:
     server_port: 6465
     camera_width: 640
     camera_height: 480
+    save_directory: /tmp/picam_pictures
     camera_matrix:
       old_f_x: 0.
       old_f_y: 0.

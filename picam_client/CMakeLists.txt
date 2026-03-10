@@ -16,6 +16,7 @@ find_package(OpenCV REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/SavePicture.srv"
   "srv/SetConfidence.srv"
   "srv/SetIOU.srv"
   "srv/StreamControl.srv"

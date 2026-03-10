@@ -15,6 +15,7 @@
 #ifndef picam_client__PICAM_CLIENT_NODE_HPP_
 #define picam_client__PICAM_CLIENT_NODE_HPP_
 
+#include <picam_client/srv/save_picture.hpp>
 #include <picam_client/srv/set_confidence.hpp>
 #include <picam_client/srv/set_iou.hpp>
 #include <picam_client/srv/stream_control.hpp>
@@ -25,6 +26,8 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <filesystem>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <thread>
@@ -43,6 +46,7 @@ private:
   int server_port_;
   int camera_width_;
   int camera_height_;
+  std::string save_directory_;
 
   // Connection state
   bool connected_{false};
@@ -67,6 +71,8 @@ private:
   rclcpp::Service<picam_client::srv::SetIOU>::SharedPtr set_iou_srv_;
   rclcpp::Service<picam_client::srv::StreamControl>::SharedPtr
       stream_control_srv_;
+  rclcpp::Service<picam_client::srv::SavePicture>::SharedPtr
+      save_picture_srv_;
 
   // Remove timer_ member
   // Add new members:
@@ -94,6 +100,13 @@ private:
   void handle_stream_control(
       const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
       std::shared_ptr<picam_client::srv::StreamControl::Response> response);
+  void handle_save_picture(
+      const std::shared_ptr<picam_client::srv::SavePicture::Request> request,
+      std::shared_ptr<picam_client::srv::SavePicture::Response> response);
+
+  // Latest image storage
+  cv::Mat latest_image_;
+  std::mutex image_mutex_;
 
   // Utility functions
   uint64_t ntohll(uint64_t val);
