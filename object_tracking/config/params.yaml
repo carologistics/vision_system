@@ -1,0 +1,5 @@
+object_tracking_server:
+  ros__parameters:
+    object_widths: [0.03, 0.0585, 0.04]  # conveyor, slide, workpiece widths in meters
+    filter_weights: [0.2, 0.2, 0.2, 0.2, 0.2]  # temporal filtering weights
+    puck_height: 0.025  # workpiece height in meters
