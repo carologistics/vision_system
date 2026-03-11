@@ -284,7 +284,7 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   }
 
   auto msg =
-      cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
+      cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg();
   msg->header.stamp = rclcpp::Time(timestamp);
 
   if (marked) {
