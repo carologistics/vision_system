@@ -13,37 +13,24 @@ find_package(sensor_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "srv/SavePicture.srv"
-  "srv/SetConfidence.srv"
-  "srv/SetIOU.srv"
-  "srv/StreamControl.srv"
-  DEPENDENCIES std_msgs
-)
+find_package(rclcpp_components REQUIRED)
+find_package(picam_client_msgs REQUIRED)
 
 include_directories(include)
 
-add_library(base64 STATIC
-  src/base64.cpp
-  include/picam_client/base64.h
-)
 
-rosidl_get_typesupport_target(cpp_typesupport_target "${PROJECT_NAME}" "rosidl_typesupport_cpp")
 
-add_executable(picam_client_node
+add_library(picam_client SHARED
   src/picam_client_node.cpp
+  src/base64.cpp
 )
 
-target_link_libraries(picam_client_node
-  "${cpp_typesupport_target}"
-  base64
+target_link_libraries(picam_client
   ${cv_bridge_LIBRARIES}
   ${OpenCV_LIBRARIES}
 )
 
-ament_target_dependencies(picam_client_node
+ament_target_dependencies(picam_client
   rclcpp
   std_msgs
   vision_msgs
@@ -51,17 +38,31 @@ ament_target_dependencies(picam_client_node
   std_srvs
   cv_bridge
   OpenCV
+  rclcpp_components
+  picam_client_msgs
 )
 
-install(TARGETS
-  picam_client_node
-  DESTINATION lib/${PROJECT_NAME}
-)
 
 install(DIRECTORY
   launch
   config
   DESTINATION share/${PROJECT_NAME}
 )
+
+ament_export_targets(export_picam_client)
+install(TARGETS picam_client
+        EXPORT export_picam_client
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+)
+
+rclcpp_components_register_node(
+    picam_client
+    PLUGIN "picam_client::PicamClientNode"
+    EXECUTABLE picam_client_node
+    EXECUTOR MultiThreadedExecutor
+)
+
 
 ament_package()

@@ -15,9 +15,10 @@
 #ifndef picam_client__PICAM_CLIENT_NODE_HPP_
 #define picam_client__PICAM_CLIENT_NODE_HPP_
 
-#include <picam_client/srv/set_confidence.hpp>
-#include <picam_client/srv/set_iou.hpp>
-#include <picam_client/srv/stream_control.hpp>
+#include <picam_client_msgs/srv/set_confidence.hpp>
+#include <picam_client_msgs/srv/set_iou.hpp>
+#include <picam_client_msgs/srv/stream_control.hpp>
+#include <picam_client_msgs/srv/save_picture.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d.hpp>
@@ -25,6 +26,7 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <future>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <thread>
@@ -34,7 +36,7 @@ namespace picam_client {
 
 class PicamClientNode : public rclcpp::Node {
 public:
-  explicit PicamClientNode();
+  explicit PicamClientNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions());
   virtual ~PicamClientNode();
 
 private:
@@ -62,11 +64,25 @@ private:
       detections_pub_;
 
   // Services
-  rclcpp::Service<picam_client::srv::SetConfidence>::SharedPtr
+  rclcpp::Service<picam_client_msgs::srv::SetConfidence>::SharedPtr
       set_confidence_srv_;
-  rclcpp::Service<picam_client::srv::SetIOU>::SharedPtr set_iou_srv_;
-  rclcpp::Service<picam_client::srv::StreamControl>::SharedPtr
+  rclcpp::Service<picam_client_msgs::srv::SetIOU>::SharedPtr set_iou_srv_;
+  rclcpp::Service<picam_client_msgs::srv::StreamControl>::SharedPtr
       stream_control_srv_;
+  rclcpp::Service<picam_client_msgs::srv::SavePicture>::SharedPtr
+      save_picture_srv_;
+
+  //Mutex
+  std::mutex so_mutex_;
+  std::mutex img_mutex_;
+
+  //Condition variable 
+  std::condition_variable img_cv_;
+  bool should_save_picture_{false};
+  cv::Mat saved_img_;
+
+  // Save-picture synchronisation (promise/future, one-shot)
+  std::shared_ptr<std::promise<cv::Mat>> save_promise_;
 
   // Remove timer_ member
   // Add new members:
@@ -86,14 +102,17 @@ private:
 
   // Service callbacks
   void handle_set_confidence(
-      const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
-      std::shared_ptr<picam_client::srv::SetConfidence::Response> response);
+      const std::shared_ptr<picam_client_msgs::srv::SetConfidence::Request> request,
+      std::shared_ptr<picam_client_msgs::srv::SetConfidence::Response> response);
   void handle_set_iou(
-      const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
-      std::shared_ptr<picam_client::srv::SetIOU::Response> response);
+      const std::shared_ptr<picam_client_msgs::srv::SetIOU::Request> request,
+      std::shared_ptr<picam_client_msgs::srv::SetIOU::Response> response);
   void handle_stream_control(
-      const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
-      std::shared_ptr<picam_client::srv::StreamControl::Response> response);
+      const std::shared_ptr<picam_client_msgs::srv::StreamControl::Request> request,
+      std::shared_ptr<picam_client_msgs::srv::StreamControl::Response> response);
+  void handle_save_picture(
+      const std::shared_ptr<picam_client_msgs::srv::SavePicture::Request> request,
+      std::shared_ptr<picam_client_msgs::srv::SavePicture::Response> response);
 
   // Utility functions
   uint64_t ntohll(uint64_t val);

@@ -20,7 +20,7 @@
 
 namespace picam_client {
 
-PicamClientNode::PicamClientNode() : Node("picam_client") {
+PicamClientNode::PicamClientNode(const rclcpp::NodeOptions & options) : Node("picam_client", options) {
   declare_parameter("server_ip", "127.0.0.1");
   declare_parameter("server_port", 8080);
   declare_parameter("camera_width", 640);
@@ -41,22 +41,22 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   detections_pub_ =
       create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
-  set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
+  set_confidence_srv_ = create_service<picam_client_msgs::srv::SetConfidence>(
       "/picam_client/set_confidence", 
       std::bind(&PicamClientNode::handle_set_confidence, this,
                 std::placeholders::_1, std::placeholders::_2));
 
-  set_iou_srv_ = create_service<picam_client::srv::SetIOU>(
+  set_iou_srv_ = create_service<picam_client_msgs::srv::SetIOU>(
       "/picam_client/set_iou", 
       std::bind(&PicamClientNode::handle_set_iou, this, std::placeholders::_1,
                 std::placeholders::_2));
 
-  stream_control_srv_ = create_service<picam_client::srv::StreamControl>(
+  stream_control_srv_ = create_service<picam_client_msgs::srv::StreamControl>(
       "/picam_client/stream_control", 
       std::bind(&PicamClientNode::handle_stream_control, this,
                 std::placeholders::_1, std::placeholders::_2));
 
-  save_picture_srv_ = create_service<picam_client::srv::SavePicture>(
+  save_picture_srv_ = create_service<picam_client_msgs::srv::SavePicture>(
       "/picam_client/save_picture", 
       std::bind(&PicamClientNode::handle_save_picture, this,
                 std::placeholders::_1, std::placeholders::_2));
@@ -73,9 +73,8 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   // Add a small delay to allow service discovery
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
-  // Remove timer creation
-  // Instead, start the read thread:
   read_thread_ = std::thread(&PicamClientNode::read_loop, this);
+  read_thread_.detach();
 
   RCLCPP_INFO(get_logger(), "PiCam Client Node initialized");
   RCLCPP_INFO(get_logger(), "OpenCV version: %s", CV_VERSION);
@@ -86,6 +85,7 @@ PicamClientNode::~PicamClientNode() {
   if (read_thread_.joinable()) {
     read_thread_.join();
   }
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   if (sockfd_ >= 0) {
     close(sockfd_);
   }
@@ -108,6 +108,7 @@ void PicamClientNode::read_loop() {
     if (!receive_data(sockfd_, data_.data(), 1)) {
       RCLCPP_ERROR(get_logger(), "Connection lost");
       connected_ = false;
+      std::scoped_lock<std::mutex> lock(so_mutex_);
       close(sockfd_);
       continue;
     }
@@ -126,10 +127,12 @@ void PicamClientNode::read_loop() {
     default:
       RCLCPP_WARN(get_logger(), "Unknown message type: %d", message_type);
     }
+
   }
 }
 
 int PicamClientNode::connect_to_server() {
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   sockfd_ = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd_ < 0) {
     RCLCPP_ERROR(get_logger(), "Socket creation error");
@@ -200,7 +203,7 @@ void PicamClientNode::send_configure_message() {
   pack(k3);
   pack(k4);
   pack(k5);
-
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   if (send(sockfd_, header, CONFIGURE_MESSAGE_SIZE, 0) !=
       CONFIGURE_MESSAGE_SIZE) {
     RCLCPP_ERROR(get_logger(), "Failed to send configuration");
@@ -208,12 +211,14 @@ void PicamClientNode::send_configure_message() {
 }
 
 void PicamClientNode::send_control_message(uint8_t message_type) {
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   uint8_t header[CONTROL_HEADER_SIZE] = {message_type};
   send(sockfd_, header, CONTROL_HEADER_SIZE, 0);
 }
 
 void PicamClientNode::send_control_message(uint8_t message_type,
                                            float payload) {
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   char header[CONTROL_HEADER_SIZE_PAYLOAD];
   header[0] = message_type;
   uint32_t network_payload = htonf(payload);
@@ -222,6 +227,7 @@ void PicamClientNode::send_control_message(uint8_t message_type,
 }
 
 bool PicamClientNode::receive_data(int sockfd, char *buffer, size_t size) {
+  std::scoped_lock<std::mutex> lock(so_mutex_);
   size_t total_bytes = 0;
   while (total_bytes < size) {
     ssize_t bytes = read(sockfd, buffer + total_bytes, size - total_bytes);
@@ -277,6 +283,13 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   } else {
     image_pub_->publish(*msg);
   }
+
+  std::unique_lock<std::mutex> lock(img_mutex_);
+  if (should_save_picture_) {
+    saved_img_ = img.clone();
+    img_cv_.notify_all();
+    should_save_picture_ = false;
+  }
 }
 
 void PicamClientNode::handle_detection_message(
@@ -331,61 +344,61 @@ void PicamClientNode::handle_detection_message(
 }
 
 void PicamClientNode::handle_set_confidence(
-    const std::shared_ptr<picam_client::srv::SetConfidence::Request> request,
-    std::shared_ptr<picam_client::srv::SetConfidence::Response> response) {
+    const std::shared_ptr<picam_client_msgs::srv::SetConfidence::Request> request,
+    std::shared_ptr<picam_client_msgs::srv::SetConfidence::Response> response) {
   send_control_message(12, request->confidence);
   response->success = true;
   response->message = "Confidence set";
 }
 
 void PicamClientNode::handle_set_iou(
-    const std::shared_ptr<picam_client::srv::SetIOU::Request> request,
-    std::shared_ptr<picam_client::srv::SetIOU::Response> response) {
+    const std::shared_ptr<picam_client_msgs::srv::SetIOU::Request> request,
+    std::shared_ptr<picam_client_msgs::srv::SetIOU::Response> response) {
   send_control_message(13, request->iou);
   response->success = true;
   response->message = "IOU set";
 }
 
 void PicamClientNode::handle_stream_control(
-    const std::shared_ptr<picam_client::srv::StreamControl::Request> request,
-    std::shared_ptr<picam_client::srv::StreamControl::Response> response) {
+    const std::shared_ptr<picam_client_msgs::srv::StreamControl::Request> request,
+    std::shared_ptr<picam_client_msgs::srv::StreamControl::Response> response) {
   switch (request->command) {
-  case picam_client::srv::StreamControl::Request::ACTIVATE:
+  case picam_client_msgs::srv::StreamControl::Request::ACTIVATE:
     send_control_message(4);
     response->success = true;
     response->message = "Stream activated";
     break;
-  case picam_client::srv::StreamControl::Request::ACTIVATE_MARKED:
+  case picam_client_msgs::srv::StreamControl::Request::ACTIVATE_MARKED:
     send_control_message(5);
     response->success = true;
     response->message = "Marked stream activated";
     break;
-  case picam_client::srv::StreamControl::Request::DEACTIVATE:
+  case picam_client_msgs::srv::StreamControl::Request::DEACTIVATE:
     send_control_message(6);
     response->success = true;
     response->message = "Stream deactivated";
     break;
-  case picam_client::srv::StreamControl::Request::DEACTIVATE_MARKED:
+  case picam_client_msgs::srv::StreamControl::Request::DEACTIVATE_MARKED:
     send_control_message(7);
     response->success = true;
     response->message = "Marked stream deactivated";
     break;
-  case picam_client::srv::StreamControl::Request::SWITCH_TO_WORKPIECE:
+  case picam_client_msgs::srv::StreamControl::Request::SWITCH_TO_WORKPIECE:
     send_control_message(8);
     response->success = true;
     response->message = "Switched to workpiece detection";
     break;
-  case picam_client::srv::StreamControl::Request::SWITCH_TO_CONVEYOR:
+  case picam_client_msgs::srv::StreamControl::Request::SWITCH_TO_CONVEYOR:
     send_control_message(9);
     response->success = true;
     response->message = "Switched to conveyor detection";
     break;
-  case picam_client::srv::StreamControl::Request::SWITCH_TO_SLIDE:
+  case picam_client_msgs::srv::StreamControl::Request::SWITCH_TO_SLIDE:
     send_control_message(10);
     response->success = true;
     response->message = "Switched to slide detection";
     break;
-  case picam_client::srv::StreamControl::Request::SWITCH_OFF_DETECTION:
+  case picam_client_msgs::srv::StreamControl::Request::SWITCH_OFF_DETECTION:
     send_control_message(11);
     response->success = true;
     response->message = "Detection switched off";
@@ -398,11 +411,45 @@ void PicamClientNode::handle_stream_control(
 }
 
 void PicamClientNode::handle_save_picture(
-  const std::shared_ptr<picam_client::srv::SavePicture::Request> request,
-  std::shared_ptr<picam_client::srv::SavePicture::Response> response) {
+  const std::shared_ptr<picam_client_msgs::srv::SavePicture::Request> request,
+  std::shared_ptr<picam_client_msgs::srv::SavePicture::Response> response) {
+  RCLCPP_INFO(get_logger(), "Received save picture request with directory: '%s'", request->save_directory.c_str());
+  std::unique_lock<std::mutex> lock(img_mutex_);
+  should_save_picture_ = true;
+
+  bool status = img_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return !should_save_picture_; });
+  if (status == false) {
+    should_save_picture_ = false; // reset the flag
+    response->success = false;
+    response->message = "Timeout: no frame received within 1 s";
+    return;
+  }
+
+  // Determine save directory
+  std::string save_dir = request->save_directory;
+  if (save_dir.empty()) {
+    save_dir = "/tmp";
+  }
+
+  if (saved_img_.empty()) {
+    response->success = false;
+    response->message = "Received an empty image";
+    return;
+  }
+
+  auto now = std::chrono::system_clock::now();
+  std::string filename = save_dir + "/img_" + std::to_string(now.time_since_epoch().count()) + ".png";
+
+  if (!cv::imwrite(filename, saved_img_)) {
+    response->success = false;
+    response->message = "cv::imwrite failed for " + filename;
+    return;
+  }
 
   response->success = true;
-  response->message = "Picture capture command sent";
+  response->message = "Saved 1 image";
+  response->saved_files.push_back(filename);
+  RCLCPP_INFO(get_logger(), "Saved picture: %s", filename.c_str());
 }
 
 uint64_t PicamClientNode::ntohll(uint64_t val) {
@@ -425,9 +472,5 @@ uint32_t PicamClientNode::htonf(float val) {
 
 } // namespace picam_client
 
-int main(int argc, char **argv) {
-  rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<picam_client::PicamClientNode>());
-  rclcpp::shutdown();
-  return 0;
-}
+#include <rclcpp_components/register_node_macro.hpp>
+RCLCPP_COMPONENTS_REGISTER_NODE(picam_client::PicamClientNode)
