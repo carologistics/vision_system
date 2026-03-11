@@ -16,6 +16,9 @@
 #include "picam_client/base64.h"
 #include <chrono>
 #include <cv_bridge/cv_bridge.hpp>
+#include <filesystem>
+#include <iomanip>
+#include <sstream>
 #include <thread>
 
 namespace picam_client {
@@ -25,6 +28,7 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   declare_parameter("server_port", 8080);
   declare_parameter("camera_width", 640);
   declare_parameter("camera_height", 480);
+  declare_parameter("save_directory", "/tmp/picam_pictures");
 
   // Declare detection parameters
   declare_parameter("detection.confidence", 0.5);
@@ -34,12 +38,22 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   server_port_ = get_parameter("server_port").as_int();
   camera_width_ = get_parameter("camera_width").as_int();
   camera_height_ = get_parameter("camera_height").as_int();
+  save_directory_ = get_parameter("save_directory").as_string();
 
   image_pub_ = create_publisher<sensor_msgs::msg::Image>("camera/image", 10);
   image_marked_pub_ =
       create_publisher<sensor_msgs::msg::Image>("camera/image_marked", 10);
   detections_pub_ =
       create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
+
+  // Subscribe to our own image topic so the callback runs on the executor thread
+  image_sub_ = create_subscription<sensor_msgs::msg::Image>(
+      "camera/image", 10,
+      [this](const sensor_msgs::msg::Image::SharedPtr msg) {
+        cv_bridge::CvImagePtr cv_ptr =
+            cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        latest_image_ = cv_ptr->image;
+      });
 
   set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
       "/picam_client/set_confidence", // Add full path
@@ -56,6 +70,11 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
       std::bind(&PicamClientNode::handle_stream_control, this,
                 std::placeholders::_1, std::placeholders::_2));
 
+  save_picture_srv_ = create_service<picam_client::srv::SavePicture>(
+      "/picam_client/save_picture",
+      std::bind(&PicamClientNode::handle_save_picture, this,
+                std::placeholders::_1, std::placeholders::_2));
+
   // After creating services, add debug logs
   RCLCPP_INFO(get_logger(), "Service '/set_confidence' created at: %s",
               set_confidence_srv_->get_service_name());
@@ -63,6 +82,8 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
               set_iou_srv_->get_service_name());
   RCLCPP_INFO(get_logger(), "Service '/stream_control' created at: %s",
               stream_control_srv_->get_service_name());
+  RCLCPP_INFO(get_logger(), "Service '/save_picture' created at: %s",
+              save_picture_srv_->get_service_name());
 
   // Add a small delay to allow service discovery
   std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -263,7 +284,7 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   }
 
   auto msg =
-      cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
+      cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg();
   msg->header.stamp = rclcpp::Time(timestamp);
 
   if (marked) {
@@ -389,6 +410,80 @@ void PicamClientNode::handle_stream_control(
     response->message = "Unknown command";
     break;
   }
+}
+
+void PicamClientNode::handle_save_picture(
+    const std::shared_ptr<picam_client::srv::SavePicture::Request> request,
+    std::shared_ptr<picam_client::srv::SavePicture::Response> response) {
+  // Determine save directory
+  std::string save_dir = request->save_directory.empty()
+                             ? save_directory_
+                             : request->save_directory;
+
+  // Create directory if it doesn't exist
+  try {
+    std::filesystem::create_directories(save_dir);
+  } catch (const std::filesystem::filesystem_error &e) {
+    response->success = false;
+    response->message =
+        "Failed to create directory '" + save_dir + "': " + e.what();
+    return;
+  }
+
+  int count = request->count <= 0 ? 1 : request->count;
+  float interval = request->interval <= 0.0f ? 1.0f : request->interval;
+
+  std::vector<std::string> saved_files;
+
+  for (int i = 0; i < count; ++i) {
+    // Wait for the interval before taking subsequent pictures
+    if (i > 0) {
+      std::this_thread::sleep_for(
+          std::chrono::milliseconds(static_cast<int>(interval * 1000)));
+    }
+
+    // Grab the latest image
+    cv::Mat image;
+    if (latest_image_.empty()) {
+      response->success = false;
+      response->message = "No image available from camera";
+      response->saved_files = saved_files;
+      return;
+    }
+    image = latest_image_.clone();
+
+    // Generate filename from current date and time
+    auto now = std::chrono::system_clock::now();
+    auto time_t_now = std::chrono::system_clock::to_time_t(now);
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                  now.time_since_epoch()) %
+              1000;
+    std::tm tm_now;
+    localtime_r(&time_t_now, &tm_now);
+
+    std::ostringstream filename;
+    filename << std::put_time(&tm_now, "%Y-%m-%d_%H-%M-%S") << "_"
+             << std::setfill('0') << std::setw(3) << ms.count() << ".png";
+
+    std::string filepath =
+        save_dir + "/" + filename.str();
+
+    // Save the image
+    if (!cv::imwrite(filepath, image)) {
+      response->success = false;
+      response->message = "Failed to save image to '" + filepath + "'";
+      response->saved_files = saved_files;
+      return;
+    }
+
+    saved_files.push_back(filepath);
+    RCLCPP_INFO(get_logger(), "Saved picture: %s", filepath.c_str());
+  }
+
+  response->success = true;
+  response->message =
+      "Saved " + std::to_string(saved_files.size()) + " picture(s)";
+  response->saved_files = saved_files;
 }
 
 uint64_t PicamClientNode::ntohll(uint64_t val) {
