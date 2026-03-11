@@ -1,0 +1,5 @@
+string save_directory           # Directory to save pictures (empty = use default from params)
+---
+bool success
+string message
+string[] saved_files             # List of saved file paths

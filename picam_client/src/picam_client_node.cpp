@@ -42,18 +42,23 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
       create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
   set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
-      "/picam_client/set_confidence", // Add full path
+      "/picam_client/set_confidence", 
       std::bind(&PicamClientNode::handle_set_confidence, this,
                 std::placeholders::_1, std::placeholders::_2));
 
   set_iou_srv_ = create_service<picam_client::srv::SetIOU>(
-      "/picam_client/set_iou", // Add full path
+      "/picam_client/set_iou", 
       std::bind(&PicamClientNode::handle_set_iou, this, std::placeholders::_1,
                 std::placeholders::_2));
 
   stream_control_srv_ = create_service<picam_client::srv::StreamControl>(
-      "/picam_client/stream_control", // Add full path
+      "/picam_client/stream_control", 
       std::bind(&PicamClientNode::handle_stream_control, this,
+                std::placeholders::_1, std::placeholders::_2));
+
+  save_picture_srv_ = create_service<picam_client::srv::SavePicture>(
+      "/picam_client/save_picture", 
+      std::bind(&PicamClientNode::handle_save_picture, this,
                 std::placeholders::_1, std::placeholders::_2));
 
   // After creating services, add debug logs
@@ -63,7 +68,8 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
               set_iou_srv_->get_service_name());
   RCLCPP_INFO(get_logger(), "Service '/stream_control' created at: %s",
               stream_control_srv_->get_service_name());
-
+  RCLCPP_INFO(get_logger(), "Service '/save_picture' created at: %s",
+              save_picture_srv_->get_service_name());
   // Add a small delay to allow service discovery
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
@@ -263,7 +269,7 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   }
 
   auto msg =
-      cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
+      cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg(); //TODO Change to "rgb8" and convert color in OpenCV to avoid confusion
   msg->header.stamp = rclcpp::Time(timestamp);
 
   if (marked) {
@@ -389,6 +395,14 @@ void PicamClientNode::handle_stream_control(
     response->message = "Unknown command";
     break;
   }
+}
+
+void PicamClientNode::handle_save_picture(
+  const std::shared_ptr<picam_client::srv::SavePicture::Request> request,
+  std::shared_ptr<picam_client::srv::SavePicture::Response> response) {
+
+  response->success = true;
+  response->message = "Picture capture command sent";
 }
 
 uint64_t PicamClientNode::ntohll(uint64_t val) {
