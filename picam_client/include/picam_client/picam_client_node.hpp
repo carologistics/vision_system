@@ -27,7 +27,6 @@
 #include <arpa/inet.h>
 #include <chrono>
 #include <filesystem>
-#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <thread>
@@ -64,6 +63,9 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_marked_pub_;
   rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr
       detections_pub_;
+
+  // Subscriptions
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
 
   // Services
   rclcpp::Service<picam_client::srv::SetConfidence>::SharedPtr
@@ -106,7 +108,6 @@ private:
 
   // Latest image storage
   cv::Mat latest_image_;
-  std::mutex image_mutex_;
 
   // Utility functions
   uint64_t ntohll(uint64_t val);

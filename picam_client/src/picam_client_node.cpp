@@ -46,6 +46,15 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   detections_pub_ =
       create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
+  // Subscribe to our own image topic so the callback runs on the executor thread
+  image_sub_ = create_subscription<sensor_msgs::msg::Image>(
+      "camera/image", 10,
+      [this](const sensor_msgs::msg::Image::SharedPtr msg) {
+        cv_bridge::CvImagePtr cv_ptr =
+            cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+        latest_image_ = cv_ptr->image;
+      });
+
   set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
       "/picam_client/set_confidence", // Add full path
       std::bind(&PicamClientNode::handle_set_confidence, this,
@@ -274,12 +283,6 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
     return;
   }
 
-  // Store the latest image for the save_picture service
-  {
-    std::lock_guard<std::mutex> lock(image_mutex_);
-    latest_image_ = img.clone();
-  }
-
   auto msg =
       cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
   msg->header.stamp = rclcpp::Time(timestamp);
@@ -441,16 +444,13 @@ void PicamClientNode::handle_save_picture(
 
     // Grab the latest image
     cv::Mat image;
-    {
-      std::lock_guard<std::mutex> lock(image_mutex_);
-      if (latest_image_.empty()) {
-        response->success = false;
-        response->message = "No image available from camera";
-        response->saved_files = saved_files;
-        return;
-      }
-      image = latest_image_.clone();
+    if (latest_image_.empty()) {
+      response->success = false;
+      response->message = "No image available from camera";
+      response->saved_files = saved_files;
+      return;
     }
+    image = latest_image_.clone();
 
     // Generate filename from current date and time
     auto now = std::chrono::system_clock::now();
