@@ -26,7 +26,9 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <string>
 #include <thread>
@@ -64,8 +66,7 @@ private:
   rclcpp::Publisher<vision_msgs::msg::Detection2DArray>::SharedPtr
       detections_pub_;
 
-  // Subscriptions
-  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  // Subscriptions (none currently needed)
 
   // Services
   rclcpp::Service<picam_client::srv::SetConfidence>::SharedPtr
@@ -108,12 +109,16 @@ private:
 
   // Latest image storage
   cv::Mat latest_image_;
+  std::mutex latest_image_mutex_;
+  std::condition_variable latest_image_cv_;
+  uint64_t latest_image_seq_{0};
 
   // Utility functions
   uint64_t ntohll(uint64_t val);
   float ntohlf(float val);
   uint32_t htonf(float val);
 
+  static constexpr int MAX_PICTURE_COUNT = 100;
   static constexpr int HEADER_SIZE_1 = 20;
   static constexpr int HEADER_SIZE_2 = 20;
   static constexpr int HEADER_SIZE_3 = 32;

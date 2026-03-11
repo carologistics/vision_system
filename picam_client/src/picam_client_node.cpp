@@ -46,15 +46,6 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
   detections_pub_ =
       create_publisher<vision_msgs::msg::Detection2DArray>("detections", 10);
 
-  // Subscribe to our own image topic so the callback runs on the executor thread
-  image_sub_ = create_subscription<sensor_msgs::msg::Image>(
-      "camera/image", 10,
-      [this](const sensor_msgs::msg::Image::SharedPtr msg) {
-        cv_bridge::CvImagePtr cv_ptr =
-            cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-        latest_image_ = cv_ptr->image;
-      });
-
   set_confidence_srv_ = create_service<picam_client::srv::SetConfidence>(
       "/picam_client/set_confidence", // Add full path
       std::bind(&PicamClientNode::handle_set_confidence, this,
@@ -82,7 +73,7 @@ PicamClientNode::PicamClientNode() : Node("picam_client") {
               set_iou_srv_->get_service_name());
   RCLCPP_INFO(get_logger(), "Service '/stream_control' created at: %s",
               stream_control_srv_->get_service_name());
-  RCLCPP_INFO(get_logger(), "Service '/save_picture' created at: %s",
+  RCLCPP_INFO(get_logger(), "Service '/picam_client/save_picture' created at: %s",
               save_picture_srv_->get_service_name());
 
   // Add a small delay to allow service discovery
@@ -284,8 +275,16 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   }
 
   auto msg =
-      cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg();
+      cv_bridge::CvImage(std_msgs::msg::Header(), "bgr8", img).toImageMsg();
   msg->header.stamp = rclcpp::Time(timestamp);
+
+  // Store the latest image with mutex protection (used by save_picture service)
+  {
+    std::lock_guard<std::mutex> lock(latest_image_mutex_);
+    latest_image_ = img.clone();
+    ++latest_image_seq_;
+    latest_image_cv_.notify_all();
+  }
 
   if (marked) {
     image_marked_pub_->publish(*msg);
@@ -415,10 +414,59 @@ void PicamClientNode::handle_stream_control(
 void PicamClientNode::handle_save_picture(
     const std::shared_ptr<picam_client::srv::SavePicture::Request> request,
     std::shared_ptr<picam_client::srv::SavePicture::Response> response) {
-  // Determine save directory
-  std::string save_dir = request->save_directory.empty()
-                             ? save_directory_
-                             : request->save_directory;
+  // Determine save directory: request path must be relative and free of ".."
+  std::string save_dir;
+  if (request->save_directory.empty()) {
+    save_dir = save_directory_;
+  } else {
+    std::filesystem::path req_path(request->save_directory);
+    if (req_path.is_absolute()) {
+      response->success = false;
+      response->message =
+          "save_directory must be a relative path, not an absolute path";
+      return;
+    }
+    for (const auto &component : req_path) {
+      if (component == "..") {
+        response->success = false;
+        response->message =
+            "save_directory must not contain '..' path components";
+        return;
+      }
+    }
+    save_dir =
+        (std::filesystem::path(save_directory_) / req_path).string();
+
+    // Verify the resolved path stays within the configured base directory
+    try {
+      std::filesystem::path canonical_base =
+          std::filesystem::weakly_canonical(save_directory_);
+      std::filesystem::path canonical_candidate =
+          std::filesystem::weakly_canonical(save_dir);
+      auto [base_it, cand_it] =
+          std::mismatch(canonical_base.begin(), canonical_base.end(),
+                        canonical_candidate.begin(), canonical_candidate.end());
+      if (base_it != canonical_base.end()) {
+        response->success = false;
+        response->message =
+            "save_directory must remain within the configured base directory";
+        return;
+      }
+    } catch (const std::filesystem::filesystem_error &e) {
+      response->success = false;
+      response->message =
+          std::string("Failed to validate save_directory: ") + e.what();
+      return;
+    }
+  }
+
+  // Enforce maximum picture count
+  if (request->count > MAX_PICTURE_COUNT) {
+    response->success = false;
+    response->message = "count exceeds maximum allowed value of " +
+                        std::to_string(MAX_PICTURE_COUNT);
+    return;
+  }
 
   // Create directory if it doesn't exist
   try {
@@ -432,25 +480,33 @@ void PicamClientNode::handle_save_picture(
 
   int count = request->count <= 0 ? 1 : request->count;
   float interval = request->interval <= 0.0f ? 1.0f : request->interval;
+  auto interval_ms = std::chrono::milliseconds(static_cast<int>(interval * 1000));
 
   std::vector<std::string> saved_files;
 
   for (int i = 0; i < count; ++i) {
-    // Wait for the interval before taking subsequent pictures
+    // Honour the requested interval between shots (except before the first)
     if (i > 0) {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(static_cast<int>(interval * 1000)));
+      std::this_thread::sleep_for(interval_ms);
     }
 
-    // Grab the latest image
+    // Wait for the next frame to arrive from the camera
     cv::Mat image;
-    if (latest_image_.empty()) {
-      response->success = false;
-      response->message = "No image available from camera";
-      response->saved_files = saved_files;
-      return;
+    {
+      std::unique_lock<std::mutex> lock(latest_image_mutex_);
+      // Record the current sequence number so we wait for a truly fresh frame
+      uint64_t wait_seq = latest_image_seq_;
+      if (!latest_image_cv_.wait_for(lock, std::chrono::seconds(5),
+                                     [this, wait_seq]() {
+                                       return latest_image_seq_ > wait_seq;
+                                     })) {
+        response->success = false;
+        response->message = "Timed out waiting for camera frame";
+        response->saved_files = saved_files;
+        return;
+      }
+      image = latest_image_.clone();
     }
-    image = latest_image_.clone();
 
     // Generate filename from current date and time
     auto now = std::chrono::system_clock::now();
