@@ -1,5 +1,6 @@
-string save_directory           # Directory to save pictures (empty = use default from params)
-int32 count                     # Number of pictures to take (default: 1)
+string save_directory           # Relative subdirectory under the configured base picture directory
+                                 # (empty = use default from params; must NOT be an absolute path or contain "..")
+int32 count                     # Number of pictures to take (default: 1, max: 100)
 float32 interval                # Interval between pictures in seconds (default: 1.0)
 ---
 bool success
