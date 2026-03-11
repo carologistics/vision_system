@@ -282,6 +282,8 @@ void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
   {
     std::lock_guard<std::mutex> lock(latest_image_mutex_);
     latest_image_ = img.clone();
+    ++latest_image_seq_;
+    latest_image_cv_.notify_all();
   }
 
   if (marked) {
@@ -478,23 +480,28 @@ void PicamClientNode::handle_save_picture(
 
   int count = request->count <= 0 ? 1 : request->count;
   float interval = request->interval <= 0.0f ? 1.0f : request->interval;
+  auto interval_ms = std::chrono::milliseconds(static_cast<int>(interval * 1000));
 
   std::vector<std::string> saved_files;
 
   for (int i = 0; i < count; ++i) {
-    // Wait for the interval before taking subsequent pictures
+    // Honour the requested interval between shots (except before the first)
     if (i > 0) {
-      std::this_thread::sleep_for(
-          std::chrono::milliseconds(static_cast<int>(interval * 1000)));
+      std::this_thread::sleep_for(interval_ms);
     }
 
-    // Grab the latest image with mutex protection
+    // Wait for the next frame to arrive from the camera
     cv::Mat image;
     {
-      std::lock_guard<std::mutex> lock(latest_image_mutex_);
-      if (latest_image_.empty()) {
+      std::unique_lock<std::mutex> lock(latest_image_mutex_);
+      // Record the current sequence number so we wait for a truly fresh frame
+      uint64_t wait_seq = latest_image_seq_;
+      if (!latest_image_cv_.wait_for(lock, std::chrono::seconds(5),
+                                     [this, wait_seq]() {
+                                       return latest_image_seq_ > wait_seq;
+                                     })) {
         response->success = false;
-        response->message = "No image available from camera";
+        response->message = "Timed out waiting for camera frame";
         response->saved_files = saved_files;
         return;
       }

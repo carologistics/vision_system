@@ -26,6 +26,7 @@
 
 #include <arpa/inet.h>
 #include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <mutex>
 #include <opencv2/opencv.hpp>
@@ -109,6 +110,8 @@ private:
   // Latest image storage
   cv::Mat latest_image_;
   std::mutex latest_image_mutex_;
+  std::condition_variable latest_image_cv_;
+  uint64_t latest_image_seq_{0};
 
   // Utility functions
   uint64_t ntohll(uint64_t val);
