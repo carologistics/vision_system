@@ -93,67 +93,75 @@ PicamClientNode::~PicamClientNode() {
 
 void PicamClientNode::read_loop() {
   while (!should_exit_) {
-    if (!connected_) {
-      if (connect_to_server() < 0) {
-        RCLCPP_ERROR(get_logger(), "Failed to connect, retrying...");
-        std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_INTERVAL));
-        continue;
-      }
-      RCLCPP_INFO(get_logger(), "Connected to server");
-      connected_ = true;
-    }
+    // TODO: Re-enable server connection for production
+    // if (!connected_) {
+    //   if (connect_to_server() < 0) {
+    //     RCLCPP_ERROR(get_logger(), "Failed to connect, retrying...");
+    //     std::this_thread::sleep_for(std::chrono::seconds(RECONNECT_INTERVAL));
+    //     continue;
+    //   }
+    //   RCLCPP_INFO(get_logger(), "Connected to server");
+    //   connected_ = true;
+    // }
 
-    // Read incoming messages
-    data_.resize(1);
-    if (!receive_data(sockfd_, data_.data(), 1)) {
-      RCLCPP_ERROR(get_logger(), "Connection lost");
-      connected_ = false;
-      std::scoped_lock<std::mutex> lock(so_mutex_);
-      close(sockfd_);
-      continue;
-    }
+    // // Read incoming messages
+    // data_.resize(1);
+    // if (!receive_data(sockfd_, data_.data(), 1)) {
+    //   RCLCPP_ERROR(get_logger(), "Connection lost");
+    //   connected_ = false;
+    //   std::scoped_lock<std::mutex> lock(so_mutex_);
+    //   close(sockfd_);
+    //   continue;
+    // }
 
-    uint8_t message_type = data_[0];
-    switch (message_type) {
-    case 1:
-      handle_image_message(data_, false);
-      break;
-    case 2:
-      handle_image_message(data_, true);
-      break;
-    case 3:
-      handle_detection_message(data_);
-      break;
-    default:
-      RCLCPP_WARN(get_logger(), "Unknown message type: %d", message_type);
-    }
+    // uint8_t message_type = data_[0];
+    // switch (message_type) {
+    // case 1:
+    //   handle_image_message(data_, false);
+    //   break;
+    // case 2:
+    //   handle_image_message(data_, true);
+    //   break;
+    // case 3:
+    //   handle_detection_message(data_);
+    //   break;
+    // default:
+    //   RCLCPP_WARN(get_logger(), "Unknown message type: %d", message_type);
+    // }
 
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
   }
 }
 
 int PicamClientNode::connect_to_server() {
-  std::scoped_lock<std::mutex> lock(so_mutex_);
-  sockfd_ = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd_ < 0) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) {
     RCLCPP_ERROR(get_logger(), "Socket creation error");
     return -1;
   }
 
-  server_addr_.sin_family = AF_INET;
-  server_addr_.sin_port = htons(server_port_);
-  if (inet_pton(AF_INET, server_ip_.c_str(), &server_addr_.sin_addr) <= 0) {
+  struct sockaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(server_port_);
+  if (inet_pton(AF_INET, server_ip_.c_str(), &addr.sin_addr) <= 0) {
     RCLCPP_ERROR(get_logger(), "Invalid address");
-    close(sockfd_);
+    close(fd);
     return -1;
   }
 
-  if (connect(sockfd_, (struct sockaddr *)&server_addr_, sizeof(server_addr_)) <
-      0) {
+  if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
     RCLCPP_ERROR(get_logger(), "Connection failed");
-    close(sockfd_);
+    close(fd);
     return -1;
   }
 
+  {
+    std::scoped_lock<std::mutex> lock(so_mutex_);
+    sockfd_ = fd;
+    server_addr_ = addr;
+  }
+
+  // These each take so_mutex_ individually — safe now
   send_configure_message();
   send_control_message(13, get_parameter("detection.iou").as_double());
   send_control_message(12, get_parameter("detection.confidence").as_double());
@@ -240,49 +248,57 @@ bool PicamClientNode::receive_data(int sockfd, char *buffer, size_t size) {
 
 void PicamClientNode::handle_image_message(const std::vector<char> & /*data*/,
                                            bool marked) {
-  data_.resize(HEADER_SIZE_1);
-  if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_1)) {
-    RCLCPP_ERROR(get_logger(), "Failed to read image header");
-    return;
-  }
+  // TODO: Re-enable real image reception for production
+  // data_.resize(HEADER_SIZE_1);
+  // if (!receive_data(sockfd_, data_.data(), HEADER_SIZE_1)) {
+  //   RCLCPP_ERROR(get_logger(), "Failed to read image header");
+  //   return;
+  // }
 
-  uint64_t timestamp;
-  uint32_t width, height, length;
-  std::memcpy(&timestamp, &data_[0], 8);
-  std::memcpy(&height, &data_[8], 4);
-  std::memcpy(&width, &data_[12], 4);
-  std::memcpy(&length, &data_[16], 4);
+  // uint64_t timestamp;
+  // uint32_t width, height, length;
+  // std::memcpy(&timestamp, &data_[0], 8);
+  // std::memcpy(&height, &data_[8], 4);
+  // std::memcpy(&width, &data_[12], 4);
+  // std::memcpy(&length, &data_[16], 4);
 
-  timestamp = ntohll(timestamp);
-  height = ntohl(height);
-  width = ntohl(width);
-  length = ntohl(length);
+  // timestamp = ntohll(timestamp);
+  // height = ntohl(height);
+  // width = ntohl(width);
+  // length = ntohl(length);
 
-  std::vector<char> image_data(length);
-  if (!receive_data(sockfd_, image_data.data(), length)) {
-    RCLCPP_ERROR(get_logger(), "Failed to read image data");
-    return;
-  }
+  // std::vector<char> image_data(length);
+  // if (!receive_data(sockfd_, image_data.data(), length)) {
+  //   RCLCPP_ERROR(get_logger(), "Failed to read image data");
+  //   return;
+  // }
 
-  std::string base64_image(image_data.begin(), image_data.end());
-  std::string decoded_image = base64_decode(base64_image);
-  std::vector<uchar> img_data(decoded_image.begin(), decoded_image.end());
-  cv::Mat img = cv::imdecode(img_data, cv::IMREAD_COLOR);
+  // std::string base64_image(image_data.begin(), image_data.end());
+  // std::string decoded_image = base64_decode(base64_image);
+  // std::vector<uchar> img_data(decoded_image.begin(), decoded_image.end());
+  // cv::Mat img = cv::imdecode(img_data, cv::IMREAD_COLOR);
 
-  if (img.empty()) {
-    RCLCPP_ERROR(get_logger(), "Failed to decode image");
-    return;
-  }
+  // if (img.empty()) {
+  //   RCLCPP_ERROR(get_logger(), "Failed to decode image");
+  //   return;
+  // }
 
-  auto msg =
-      cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg(); //TODO Change to "rgb8" and convert color in OpenCV to avoid confusion
-  msg->header.stamp = rclcpp::Time(timestamp);
+  // auto msg =
+  //     cv_bridge::CvImage(std_msgs::msg::Header(), "rgb8", img).toImageMsg();
+  // msg->header.stamp = rclcpp::Time(timestamp);
 
-  if (marked) {
-    image_marked_pub_->publish(*msg);
-  } else {
-    image_pub_->publish(*msg);
-  }
+  // if (marked) {
+  //   image_marked_pub_->publish(*msg);
+  // } else {
+  //   image_pub_->publish(*msg);
+  // }
+
+  // --- Dummy image for save_picture service testing ---
+  cv::Mat img(camera_height_, camera_width_, CV_8UC3, cv::Scalar(128, 64, 32));
+  cv::putText(img, "TEST IMAGE", cv::Point(50, camera_height_ / 2),
+              cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 255, 255), 2);
+  (void)marked;
+  // ----------------------------------------------------
 
   std::unique_lock<std::mutex> lock(img_mutex_);
   if (should_save_picture_) {
@@ -414,16 +430,23 @@ void PicamClientNode::handle_save_picture(
   const std::shared_ptr<picam_client_msgs::srv::SavePicture::Request> request,
   std::shared_ptr<picam_client_msgs::srv::SavePicture::Response> response) {
   RCLCPP_INFO(get_logger(), "Received save picture request with directory: '%s'", request->save_directory.c_str());
-  std::unique_lock<std::mutex> lock(img_mutex_);
-  should_save_picture_ = true;
 
-  bool status = img_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return !should_save_picture_; });
-  if (status == false) {
-    should_save_picture_ = false; // reset the flag
-    response->success = false;
-    response->message = "Timeout: no frame received within 1 s";
-    return;
-  }
+  // TODO: Re-enable real image wait for production
+  // std::unique_lock<std::mutex> lock(img_mutex_);
+  // should_save_picture_ = true;
+  // bool status = img_cv_.wait_for(lock, std::chrono::seconds(1), [this] { return !should_save_picture_; });
+  // if (status == false) {
+  //   should_save_picture_ = false;
+  //   response->success = false;
+  //   response->message = "Timeout: no frame received within 1 s";
+  //   return;
+  // }
+
+  // --- Dummy image for testing ---
+  saved_img_ = cv::Mat(camera_height_, camera_width_, CV_8UC3, cv::Scalar(128, 64, 32));
+  cv::putText(saved_img_, "TEST IMAGE", cv::Point(50, camera_height_ / 2),
+              cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(255, 255, 255), 2);
+  // -------------------------------
 
   // Determine save directory
   std::string save_dir = request->save_directory;
