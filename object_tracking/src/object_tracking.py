@@ -28,7 +28,7 @@ from ultralytics import YOLOE
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
-MODEL_DIR = Path(__file__).resolve().parents[1]
+MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
 
 

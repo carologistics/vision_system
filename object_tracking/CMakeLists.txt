@@ -62,8 +62,8 @@ install(PROGRAMS
   RENAME object_tracking_py
 )
 
-install(FILES
-  yoloe-26n-seg.pt
+install(DIRECTORY
+  models
   DESTINATION lib/${PROJECT_NAME}/..
 )
 
