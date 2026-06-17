@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+from threading import Event, Lock, Thread
+from time import sleep
 from typing import Optional
 
 import rclpy
 from geometry_msgs.msg import TransformStamped
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, PointCloud2
 from tf2_ros import TransformBroadcaster
 
@@ -32,22 +36,37 @@ class ObjectTrackingNode(Node):
 
         self.latest_image: Optional[Image] = None
         self.latest_pointcloud: Optional[PointCloud2] = None
-        self.has_new_image = False
+        self.data_lock = Lock()
+        self.stop_update_loop = Event()
+
+        self.sensor_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+        )
+        self.sensor_callback_group = ReentrantCallbackGroup()
 
         self.image_subscription = self.create_subscription(
             Image,
             self.image_topic,
             self.handle_image,
-            qos_profile_sensor_data,
+            self.sensor_qos,
+            callback_group=self.sensor_callback_group,
         )
         self.pointcloud_subscription = self.create_subscription(
             PointCloud2,
             self.pointcloud_topic,
             self.handle_pointcloud,
-            qos_profile_sensor_data,
+            self.sensor_qos,
+            callback_group=self.sensor_callback_group,
         )
         self.target_transform_broadcaster = TransformBroadcaster(self)
-        self.update_timer = self.create_timer(0.1, self.update_pose)
+        self.update_thread = Thread(
+            target=self.update_pose,
+            name="object_tracking_update_pose",
+            daemon=True,
+        )
+        self.update_thread.start()
 
         self.get_logger().info(f"Subscribing to camera images on {self.image_topic}")
         self.get_logger().info(f"Subscribing to point cloud on {self.pointcloud_topic}")
@@ -55,19 +74,29 @@ class ObjectTrackingNode(Node):
         self.get_logger().info(f"Debug images will be saved to {DEBUG_IMAGE_PATH}")
 
     def handle_image(self, msg: Image) -> None:
-        self.latest_image = msg
-        self.has_new_image = True
+        with self.data_lock:
+            self.latest_image = msg
 
     def handle_pointcloud(self, msg: PointCloud2) -> None:
-        self.latest_pointcloud = msg
+        with self.data_lock:
+            self.latest_pointcloud = msg
 
     def update_pose(self) -> None:
-        if self.latest_image is None or not self.has_new_image:
-            return
+        while rclpy.ok() and not self.stop_update_loop.is_set():
+            with self.data_lock:
+                image = self.latest_image
 
-        image = self.latest_image
-        self.has_new_image = False
-        self.save_debug_image(image)
+            if image is None:
+                sleep(0.01)
+                continue
+
+            self.save_debug_image(image)
+
+    def destroy_node(self) -> bool:
+        self.stop_update_loop.set()
+        if self.update_thread.is_alive():
+            self.update_thread.join(timeout=1.0)
+        return super().destroy_node()
 
     def save_debug_image(self, image: Image) -> None:
         width = image.width
@@ -95,9 +124,12 @@ class ObjectTrackingNode(Node):
 def main(args: Optional[list[str]] = None) -> None:
     rclpy.init(args=args)
     node = ObjectTrackingNode()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         rclpy.shutdown()
 
