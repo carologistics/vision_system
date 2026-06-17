@@ -22,6 +22,8 @@
   <depend>tf2_geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <exec_depend>libopencv-dev</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
   <exec_depend>tf2</exec_depend>
   <exec_depend>tf2_ros</exec_depend>

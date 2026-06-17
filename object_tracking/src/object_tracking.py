@@ -5,18 +5,23 @@ from threading import Event, Lock, Thread
 from time import sleep
 from typing import Optional
 
+import cv2
+import numpy as np
 import rclpy
 from geometry_msgs.msg import TransformStamped
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from robotino_vision_msgs.srv import ToggleObjectTracking
 from sensor_msgs.msg import Image, PointCloud2
 from tf2_ros import TransformBroadcaster
+from ultralytics import YOLOE
 
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
+MODEL_PATH = "yoloe-26n-seg.pt"
 
 
 class ObjectTrackingNode(Node):
@@ -36,8 +41,13 @@ class ObjectTrackingNode(Node):
 
         self.latest_image: Optional[Image] = None
         self.latest_pointcloud: Optional[PointCloud2] = None
+        self.latest_segmentation_map: Optional[np.ndarray] = None
+        self.tracking_active = False
+        self.current_object_prompt = ""
         self.data_lock = Lock()
         self.stop_update_loop = Event()
+        self.model: Optional[YOLOE] = None
+        self.model_object_prompt = ""
 
         self.sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -60,6 +70,12 @@ class ObjectTrackingNode(Node):
             self.sensor_qos,
             callback_group=self.sensor_callback_group,
         )
+        self.object_tracking_service = self.create_service(
+            ToggleObjectTracking,
+            "object_tracking",
+            self.handle_object_tracking,
+            callback_group=self.sensor_callback_group,
+        )
         self.target_transform_broadcaster = TransformBroadcaster(self)
         self.update_thread = Thread(
             target=self.update_pose,
@@ -70,6 +86,7 @@ class ObjectTrackingNode(Node):
 
         self.get_logger().info(f"Subscribing to camera images on {self.image_topic}")
         self.get_logger().info(f"Subscribing to point cloud on {self.pointcloud_topic}")
+        self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
         self.get_logger().info(f"Debug images will be saved to {DEBUG_IMAGE_PATH}")
 
@@ -81,16 +98,35 @@ class ObjectTrackingNode(Node):
         with self.data_lock:
             self.latest_pointcloud = msg
 
+    def handle_object_tracking(
+        self,
+        request: ToggleObjectTracking.Request,
+        response: ToggleObjectTracking.Response,
+    ) -> ToggleObjectTracking.Response:
+        with self.data_lock:
+            self.tracking_active = request.enable
+            if request.enable:
+                self.current_object_prompt = request.object_prompt
+
+        response.success = True
+        response.error = ""
+        return response
+
     def update_pose(self) -> None:
         while rclpy.ok() and not self.stop_update_loop.is_set():
             with self.data_lock:
+                tracking_active = self.tracking_active
                 image = self.latest_image
+                object_prompt = self.current_object_prompt
 
-            if image is None:
+            if not tracking_active or image is None:
                 sleep(0.01)
                 continue
 
             self.save_debug_image(image)
+            segmentation_map = self.create_segmentation_map(image, object_prompt)
+            with self.data_lock:
+                self.latest_segmentation_map = segmentation_map
 
     def destroy_node(self) -> bool:
         self.stop_update_loop.set()
@@ -116,6 +152,44 @@ class ObjectTrackingNode(Node):
                     rgb_row[pixel + 1] = row[pixel + 1]
                     rgb_row[pixel + 2] = row[pixel]
                 image_file.write(rgb_row)
+
+    def create_segmentation_map(self, image: Image, object_prompt: str) -> np.ndarray:
+        if self.model is None:
+            self.model = YOLOE(MODEL_PATH)
+
+        if object_prompt != self.model_object_prompt:
+            self.model.set_classes([object_prompt])
+            self.model_object_prompt = object_prompt
+
+        frame = self.image_to_bgr(image)
+        results = self.model(frame, verbose=False)
+        segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)
+
+        if results[0].masks is None:
+            return segmentation_map
+
+        masks = results[0].masks.data.cpu().numpy()
+        for label, mask in enumerate(masks, start=1):
+            if label > 255:
+                break
+            if mask.shape != segmentation_map.shape:
+                mask = cv2.resize(
+                    mask.astype(np.uint8),
+                    (image.width, image.height),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+            segmentation_map[mask.astype(bool)] = label
+
+        return segmentation_map
+
+    def image_to_bgr(self, image: Image) -> np.ndarray:
+        row_bytes = image.width * 3
+        return (
+            np.frombuffer(image.data, dtype=np.uint8)
+            .reshape(image.height, image.step)[:, :row_bytes]
+            .reshape(image.height, image.width, 3)
+            .copy()
+        )
 
     def publish_target_transform(self, transform: TransformStamped) -> None:
         self.target_transform_broadcaster.sendTransform(transform)
