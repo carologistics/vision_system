@@ -15,7 +15,7 @@ ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking 
 
 Example:
 ```
-ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'red workpiece', reference_frame: '/cam', distance_threshold: 0.2, object_tf_name: 'workpiece'}"
+ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'grey eurobox EG 3212', reference_frame: 'base_link', distance_threshold: 10.0, object_tf_name: 'manipulation_target'}"
 ```
 
 enable:             turns the tool on (if all other parameters are set) or off (enough if enable == false)
