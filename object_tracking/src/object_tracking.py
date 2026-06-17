@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import importlib.util
 import os
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -85,9 +84,9 @@ class ObjectTrackingNode(Node):
         self.tracking_active = False
         self.current_object_prompt = ""
         self.data_lock = Lock()
+        self.model_lock = Lock()
         self.stop_update_loop = Event()
-        self.model: Optional[YOLOE] = None
-        self.model_object_prompt = ""
+        self.model = YOLOE(MODEL_PATH)
 
         self.sensor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -147,10 +146,21 @@ class ObjectTrackingNode(Node):
         request: ToggleObjectTracking.Request,
         response: ToggleObjectTracking.Response,
     ) -> ToggleObjectTracking.Response:
-        with self.data_lock:
-            self.tracking_active = request.enable
-            if request.enable:
+        if request.enable:
+            print(f"Enabling object tracking for: {request.object_prompt}", flush=True)
+            with self.data_lock:
+                self.tracking_active = False
+
+            with self.model_lock:
+                self.model.set_classes([request.object_prompt])
+
+            with self.data_lock:
                 self.current_object_prompt = request.object_prompt
+                self.tracking_active = True
+        else:
+            print(f"Disabling object tracking", flush=True)
+            with self.data_lock:
+                self.tracking_active = False
 
         response.success = True
         response.error = ""
@@ -161,13 +171,12 @@ class ObjectTrackingNode(Node):
             with self.data_lock:
                 tracking_active = self.tracking_active
                 image = self.latest_image
-                object_prompt = self.current_object_prompt
 
             if not tracking_active or image is None:
                 sleep(0.01)
                 continue
 
-            segmentation_map = self.create_segmentation_map(image, object_prompt)
+            segmentation_map = self.create_segmentation_map(image)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
             if self.debug:
@@ -217,23 +226,10 @@ class ObjectTrackingNode(Node):
             dtype=np.uint8,
         )
 
-    def create_segmentation_map(self, image: Image, object_prompt: str) -> np.ndarray:
-        if self.model is None:
-            if not Path(MODEL_PATH).is_file():
-                raise FileNotFoundError(f"YOLOE model file not found: {MODEL_PATH}")
-            if importlib.util.find_spec("clip") is None:
-                raise ModuleNotFoundError(
-                    "YOLOE text prompts require the 'clip' Python package. "
-                    "Install it manually before running this node."
-                )
-            self.model = YOLOE(MODEL_PATH)
-
-        if object_prompt != self.model_object_prompt:
-            self.model.set_classes([object_prompt])
-            self.model_object_prompt = object_prompt
-
+    def create_segmentation_map(self, image: Image) -> np.ndarray:
         frame = self.image_to_bgr(image)
-        results = self.model(frame, verbose=False)
+        with self.model_lock:
+            results = self.model(frame, verbose=False)
         segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)
 
         if results[0].masks is None:
