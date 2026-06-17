@@ -1,5 +1,5 @@
 bool enable
-string object_type
+string object_prompt
 string reference_frame
 float64 distance_threshold
 string object_tf_name

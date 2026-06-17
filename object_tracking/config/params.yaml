@@ -1,5 +1,12 @@
 object_tracking_server:
   ros__parameters:
-    object_widths: [0.03, 0.0585, 0.04]  # conveyor, slide, workpiece widths in meters
     filter_weights: [0.2, 0.2, 0.2, 0.2, 0.2]  # temporal filtering weights
-    puck_height: 0.025  # workpiece height in meters
+    image_topic: /camera/frame_rgb
+    pointcloud_topic: /camera/frame_pc
+    camera_frame: cam_frame
+    min_mask_points: 20
+    segmentation_model_path: yoloe-26n-seg.onnx
+    segmentation_target_size: 640
+    segmentation_confidence: 0.25
+    segmentation_iou: 0.5
+    debug_image_path: /tmp/object_tracking_latest_image.ppm
