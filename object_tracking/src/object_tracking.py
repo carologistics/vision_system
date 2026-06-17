@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 
+import importlib.util
+import os
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import sleep
 from typing import Optional
+
+os.environ["YOLO_AUTOINSTALL"] = "false"
+os.environ["YOLO_OFFLINE"] = "true"
 
 import cv2
 import numpy as np
@@ -21,7 +26,7 @@ from ultralytics import YOLOE
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
-MODEL_PATH = "yoloe-26n-seg.pt"
+MODEL_PATH = "/home/matteo/ros2/caro_vision_ws/src/vision_system/object_tracking/yoloe-26n-seg.pt"
 
 
 class ObjectTrackingNode(Node):
@@ -155,6 +160,13 @@ class ObjectTrackingNode(Node):
 
     def create_segmentation_map(self, image: Image, object_prompt: str) -> np.ndarray:
         if self.model is None:
+            if not Path(MODEL_PATH).is_file():
+                raise FileNotFoundError(f"YOLOE model file not found: {MODEL_PATH}")
+            if importlib.util.find_spec("clip") is None:
+                raise ModuleNotFoundError(
+                    "YOLOE text prompts require the 'clip' Python package. "
+                    "Install it manually before running this node."
+                )
             self.model = YOLOE(MODEL_PATH)
 
         if object_prompt != self.model_object_prompt:
