@@ -26,7 +26,7 @@ from ultralytics import YOLOE
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
-MODEL_PATH = "/home/matteo/ros2/caro_vision_ws/src/vision_system/object_tracking/yoloe-26n-seg.pt"
+MODEL_PATH = Path(__file__).resolve().parents[1] / "yoloe-26n-seg.pt"
 
 
 class ObjectTrackingNode(Node):

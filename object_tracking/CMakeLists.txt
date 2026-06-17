@@ -62,6 +62,11 @@ install(PROGRAMS
   RENAME object_tracking_py
 )
 
+install(FILES
+  yoloe-26n-seg.pt
+  DESTINATION lib/${PROJECT_NAME}/..
+)
+
 install(DIRECTORY
   config
   launch
