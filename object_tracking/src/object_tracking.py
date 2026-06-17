@@ -28,6 +28,7 @@ from ultralytics import YOLOE
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
+DEBUG_SEGMENTATION_OVERLAY_PATH = DEBUG_IMAGE_DIR / "latest_segmentation_overlay.ppm"
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
 
@@ -71,6 +72,11 @@ class ObjectTrackingNode(Node):
             self.declare_parameter("pointcloud_topic", "/camera/frame_pc")
             .get_parameter_value()
             .string_value
+        )
+        self.debug = (
+            self.declare_parameter("debug", False)
+            .get_parameter_value()
+            .bool_value
         )
 
         self.latest_image: Optional[Image] = None
@@ -122,7 +128,11 @@ class ObjectTrackingNode(Node):
         self.get_logger().info(f"Subscribing to point cloud on {self.pointcloud_topic}")
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
-        self.get_logger().info(f"Debug images will be saved to {DEBUG_IMAGE_PATH}")
+        if self.debug:
+            self.get_logger().info(f"Debug image will be saved to {DEBUG_IMAGE_PATH}")
+            self.get_logger().info(
+                f"Debug segmentation overlay will be saved to {DEBUG_SEGMENTATION_OVERLAY_PATH}"
+            )
 
     def handle_image(self, msg: Image) -> None:
         with self.data_lock:
@@ -157,10 +167,12 @@ class ObjectTrackingNode(Node):
                 sleep(0.01)
                 continue
 
-            self.save_debug_image(image)
             segmentation_map = self.create_segmentation_map(image, object_prompt)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
+            if self.debug:
+                self.save_debug_image(image)
+                self.save_debug_segmentation_overlay(image, segmentation_map)
 
     def destroy_node(self) -> bool:
         self.stop_update_loop.set()
@@ -169,23 +181,41 @@ class ObjectTrackingNode(Node):
         return super().destroy_node()
 
     def save_debug_image(self, image: Image) -> None:
-        width = image.width
-        height = image.height
-        row_bytes = width * 3
+        self.save_bgr_ppm(DEBUG_IMAGE_PATH, self.image_to_bgr(image))
 
+    def save_debug_segmentation_overlay(
+        self,
+        image: Image,
+        segmentation_map: np.ndarray,
+    ) -> None:
+        frame = self.image_to_bgr(image)
+        overlay = frame.copy()
+
+        for label in np.unique(segmentation_map):
+            if label == 0:
+                continue
+            mask = segmentation_map == label
+            color = self.segmentation_color(int(label))
+            overlay[mask] = (0.5 * frame[mask] + 0.5 * color).astype(np.uint8)
+
+        self.save_bgr_ppm(DEBUG_SEGMENTATION_OVERLAY_PATH, overlay)
+
+    def save_bgr_ppm(self, path: Path, image: np.ndarray) -> None:
+        height, width = image.shape[:2]
         DEBUG_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
-        with DEBUG_IMAGE_PATH.open("wb") as image_file:
+        with path.open("wb") as image_file:
             image_file.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
-            for y in range(height):
-                row_start = y * image.step
-                row = image.data[row_start : row_start + row_bytes]
-                rgb_row = bytearray(row_bytes)
-                for x in range(width):
-                    pixel = x * 3
-                    rgb_row[pixel] = row[pixel + 2]
-                    rgb_row[pixel + 1] = row[pixel + 1]
-                    rgb_row[pixel + 2] = row[pixel]
-                image_file.write(rgb_row)
+            image_file.write(image[:, :, ::-1].tobytes())
+
+    def segmentation_color(self, label: int) -> np.ndarray:
+        return np.array(
+            [
+                80 + (53 * label) % 176,
+                80 + (97 * label) % 176,
+                80 + (193 * label) % 176,
+            ],
+            dtype=np.uint8,
+        )
 
     def create_segmentation_map(self, image: Image, object_prompt: str) -> np.ndarray:
         if self.model is None:
