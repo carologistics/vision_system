@@ -21,13 +21,15 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from robotino_vision_msgs.srv import ToggleObjectTracking
 from sensor_msgs.msg import Image, PointCloud2
 from tf2_ros import TransformBroadcaster
+import ultralytics
 from ultralytics.utils import downloads as ultralytics_downloads
 from ultralytics import YOLOE
 
 
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
-MODEL_PATH = Path(__file__).resolve().parents[1] / "yoloe-26n-seg.pt"
+MODEL_DIR = Path(__file__).resolve().parents[1]
+MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
 
 
 def block_ultralytics_downloads(*args, **kwargs):
@@ -35,7 +37,25 @@ def block_ultralytics_downloads(*args, **kwargs):
     raise RuntimeError(f"Ultralytics attempted to download {url}; install all model assets manually")
 
 
+def block_ultralytics_asset_download(file, *args, **kwargs):
+    file_path = Path(str(file))
+    if file_path.is_file():
+        return str(file_path)
+
+    local_asset_path = MODEL_DIR / file_path.name
+    if local_asset_path.is_file():
+        return str(local_asset_path)
+
+    raise FileNotFoundError(
+        f"Ultralytics asset '{file_path.name}' is missing. "
+        f"Place it at {local_asset_path}; automatic downloads are disabled."
+    )
+
+
 ultralytics_downloads.safe_download = block_ultralytics_downloads
+ultralytics_downloads.download = block_ultralytics_downloads
+ultralytics_downloads.attempt_download_asset = block_ultralytics_asset_download
+ultralytics.download = block_ultralytics_downloads
 
 
 class ObjectTrackingNode(Node):
