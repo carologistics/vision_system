@@ -4,6 +4,7 @@ object_tracking_server:
     image_topic: /camera/frame_rgb
     pointcloud_topic: /camera/frame_pc
     debug: false
+    capture: false
     camera_frame: cam_frame
     min_mask_points: 20
     segmentation_model_path: yoloe-26n-seg.onnx

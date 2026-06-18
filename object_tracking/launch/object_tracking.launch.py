@@ -11,6 +11,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration('image_topic')
     pointcloud_topic = LaunchConfiguration('pointcloud_topic')
     debug = LaunchConfiguration('debug')
+    capture = LaunchConfiguration('capture')
     default_params_file = PathJoinSubstitution([
         FindPackageShare('object_tracking'),
         'config',
@@ -36,7 +37,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'debug',
             default_value='false',
-            description='Save debug camera and segmentation overlay images'
+            description='Publish segmented debug image for RViz'
+        ),
+        DeclareLaunchArgument(
+            'capture',
+            default_value='false',
+            description='Save source and segmented images to disk'
         ),
         Node(
             package='object_tracking',
@@ -48,6 +54,7 @@ def generate_launch_description():
                     'image_topic': image_topic,
                     'pointcloud_topic': pointcloud_topic,
                     'debug': ParameterValue(debug, value_type=bool),
+                    'capture': ParameterValue(capture, value_type=bool),
                 },
             ],
             output='screen'

@@ -25,9 +25,8 @@ from ultralytics.utils import downloads as ultralytics_downloads
 from ultralytics import YOLOE
 
 
-DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
-DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
-DEBUG_SEGMENTATION_OVERLAY_PATH = DEBUG_IMAGE_DIR / "latest_segmentation_overlay.ppm"
+CAPTURE_DIR = Path("/tmp/object_tracking_debug")
+SEGMENTED_IMAGE_TOPIC = "/object_tracking/segmented_image"
 ORANGE_BGR = np.array([0, 165, 255], dtype=np.uint8)
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
@@ -78,6 +77,11 @@ class ObjectTrackingNode(Node):
             .get_parameter_value()
             .bool_value
         )
+        self.capture = (
+            self.declare_parameter("capture", False)
+            .get_parameter_value()
+            .bool_value
+        )
 
         self.latest_image: Optional[Image] = None
         self.latest_pointcloud: Optional[PointCloud2] = None
@@ -85,6 +89,7 @@ class ObjectTrackingNode(Node):
         self.tracking_active = False
         self.current_object_prompt = ""
         self.debug_inference_count = 0
+        self.capture_frame_count = 0
         self.data_lock = Lock()
         self.model_lock = Lock()
         self.stop_update_loop = Event()
@@ -96,6 +101,11 @@ class ObjectTrackingNode(Node):
             reliability=ReliabilityPolicy.BEST_EFFORT,
         )
         self.sensor_callback_group = ReentrantCallbackGroup()
+        self.segmented_image_publisher = (
+            self.create_publisher(Image, SEGMENTED_IMAGE_TOPIC, 1)
+            if self.debug
+            else None
+        )
 
         self.image_subscription = self.create_subscription(
             Image,
@@ -130,10 +140,11 @@ class ObjectTrackingNode(Node):
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
         if self.debug:
-            self.get_logger().info(f"Debug image will be saved to {DEBUG_IMAGE_PATH}")
             self.get_logger().info(
-                f"Debug segmentation overlay will be saved to {DEBUG_SEGMENTATION_OVERLAY_PATH}"
+                f"Debug segmented image will be published on {SEGMENTED_IMAGE_TOPIC}"
             )
+        if self.capture:
+            self.get_logger().info(f"Capture images will be saved to {CAPTURE_DIR}")
 
     def handle_image(self, msg: Image) -> None:
         with self.data_lock:
@@ -181,9 +192,12 @@ class ObjectTrackingNode(Node):
             segmentation_map = self.create_segmentation_map(image)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
-            if self.debug:
-                self.save_debug_image(image)
-                self.save_debug_segmentation_overlay(image, segmentation_map)
+            if self.debug or self.capture:
+                segmentation_overlay = self.create_segmentation_overlay(image, segmentation_map)
+                if self.debug:
+                    self.publish_segmented_image(image, segmentation_overlay)
+                if self.capture:
+                    self.save_capture_images(image, segmentation_overlay)
 
     def destroy_node(self) -> bool:
         self.stop_update_loop.set()
@@ -191,14 +205,11 @@ class ObjectTrackingNode(Node):
             self.update_thread.join(timeout=1.0)
         return super().destroy_node()
 
-    def save_debug_image(self, image: Image) -> None:
-        self.save_bgr_ppm(DEBUG_IMAGE_PATH, self.image_to_bgr(image))
-
-    def save_debug_segmentation_overlay(
+    def create_segmentation_overlay(
         self,
         image: Image,
         segmentation_map: np.ndarray,
-    ) -> None:
+    ) -> np.ndarray:
         frame = self.image_to_bgr(image)
         overlay = frame.copy()
 
@@ -208,14 +219,54 @@ class ObjectTrackingNode(Node):
             mask = segmentation_map == label
             overlay[mask] = (0.5 * frame[mask] + 0.5 * ORANGE_BGR).astype(np.uint8)
 
-        self.save_bgr_ppm(DEBUG_SEGMENTATION_OVERLAY_PATH, overlay)
+        return overlay
+
+    def publish_segmented_image(self, image: Image, segmentation_overlay: np.ndarray) -> None:
+        if self.segmented_image_publisher is None:
+            return
+
+        self.segmented_image_publisher.publish(
+            self.bgr_to_image_msg(segmentation_overlay, image)
+        )
+
+    def save_capture_images(self, image: Image, segmentation_overlay: np.ndarray) -> None:
+        frame = self.image_to_bgr(image)
+        file_stem = self.next_capture_file_stem(image)
+
+        self.save_bgr_ppm(CAPTURE_DIR / f"{file_stem}_image.ppm", frame)
+        self.save_bgr_ppm(
+            CAPTURE_DIR / f"{file_stem}_segmented.ppm",
+            segmentation_overlay,
+        )
+
+    def next_capture_file_stem(self, image: Image) -> str:
+        self.capture_frame_count += 1
+        stamp = image.header.stamp
+        if stamp.sec or stamp.nanosec:
+            seconds = stamp.sec
+            nanoseconds = stamp.nanosec
+        else:
+            now = self.get_clock().now().nanoseconds
+            seconds, nanoseconds = divmod(now, 1_000_000_000)
+
+        return f"{seconds:010d}_{nanoseconds:09d}_{self.capture_frame_count:06d}"
 
     def save_bgr_ppm(self, path: Path, image: np.ndarray) -> None:
         height, width = image.shape[:2]
-        DEBUG_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as image_file:
             image_file.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
             image_file.write(image[:, :, ::-1].tobytes())
+
+    def bgr_to_image_msg(self, image: np.ndarray, source_image: Image) -> Image:
+        msg = Image()
+        msg.header = source_image.header
+        msg.height, msg.width = image.shape[:2]
+        msg.encoding = "bgr8"
+        msg.is_bigendian = 0
+        msg.step = msg.width * 3
+        msg.data = image.tobytes()
+        return msg
 
     def create_segmentation_map(self, image: Image) -> np.ndarray:
         frame = self.image_to_bgr(image)
