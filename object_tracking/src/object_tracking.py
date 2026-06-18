@@ -197,7 +197,7 @@ class ObjectTrackingNode(Node):
                 if self.debug:
                     self.publish_segmented_image(image, segmentation_overlay)
                 if self.capture:
-                    self.save_capture_images(image, segmentation_overlay)
+                    self.save_capture_images(image, segmentation_overlay, segmentation_map)
 
     def destroy_node(self) -> bool:
         self.stop_update_loop.set()
@@ -229,8 +229,14 @@ class ObjectTrackingNode(Node):
             self.bgr_to_image_msg(segmentation_overlay, image)
         )
 
-    def save_capture_images(self, image: Image, segmentation_overlay: np.ndarray) -> None:
+    def save_capture_images(
+        self,
+        image: Image,
+        segmentation_overlay: np.ndarray,
+        segmentation_map: np.ndarray,
+    ) -> None:
         frame = self.image_to_bgr(image)
+        segmentation_mask = np.where(segmentation_map > 0, 255, 0).astype(np.uint8)
         file_stem = self.next_capture_file_stem(image)
 
         self.save_bgr_ppm(CAPTURE_DIR / f"{file_stem}_image.ppm", frame)
@@ -238,6 +244,7 @@ class ObjectTrackingNode(Node):
             CAPTURE_DIR / f"{file_stem}_segmented.ppm",
             segmentation_overlay,
         )
+        self.save_gray_pgm(CAPTURE_DIR / f"{file_stem}_mask.pgm", segmentation_mask)
 
     def next_capture_file_stem(self, image: Image) -> str:
         self.capture_frame_count += 1
@@ -257,6 +264,13 @@ class ObjectTrackingNode(Node):
         with path.open("wb") as image_file:
             image_file.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
             image_file.write(image[:, :, ::-1].tobytes())
+
+    def save_gray_pgm(self, path: Path, image: np.ndarray) -> None:
+        height, width = image.shape[:2]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as image_file:
+            image_file.write(f"P5\n{width} {height}\n255\n".encode("ascii"))
+            image_file.write(image.tobytes())
 
     def bgr_to_image_msg(self, image: np.ndarray, source_image: Image) -> Image:
         msg = Image()
