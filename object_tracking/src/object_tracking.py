@@ -28,6 +28,7 @@ from ultralytics import YOLOE
 DEBUG_IMAGE_DIR = Path("/tmp/object_tracking_debug")
 DEBUG_IMAGE_PATH = DEBUG_IMAGE_DIR / "latest_image.ppm"
 DEBUG_SEGMENTATION_OVERLAY_PATH = DEBUG_IMAGE_DIR / "latest_segmentation_overlay.ppm"
+ORANGE_BGR = np.array([0, 165, 255], dtype=np.uint8)
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
 
@@ -83,6 +84,7 @@ class ObjectTrackingNode(Node):
         self.latest_segmentation_map: Optional[np.ndarray] = None
         self.tracking_active = False
         self.current_object_prompt = ""
+        self.debug_inference_count = 0
         self.data_lock = Lock()
         self.model_lock = Lock()
         self.stop_update_loop = Event()
@@ -204,8 +206,7 @@ class ObjectTrackingNode(Node):
             if label == 0:
                 continue
             mask = segmentation_map == label
-            color = self.segmentation_color(int(label))
-            overlay[mask] = (0.5 * frame[mask] + 0.5 * color).astype(np.uint8)
+            overlay[mask] = (0.5 * frame[mask] + 0.5 * ORANGE_BGR).astype(np.uint8)
 
         self.save_bgr_ppm(DEBUG_SEGMENTATION_OVERLAY_PATH, overlay)
 
@@ -216,16 +217,6 @@ class ObjectTrackingNode(Node):
             image_file.write(f"P6\n{width} {height}\n255\n".encode("ascii"))
             image_file.write(image[:, :, ::-1].tobytes())
 
-    def segmentation_color(self, label: int) -> np.ndarray:
-        return np.array(
-            [
-                80 + (53 * label) % 176,
-                80 + (97 * label) % 176,
-                80 + (193 * label) % 176,
-            ],
-            dtype=np.uint8,
-        )
-
     def create_segmentation_map(self, image: Image) -> np.ndarray:
         frame = self.image_to_bgr(image)
         with self.model_lock:
@@ -233,6 +224,7 @@ class ObjectTrackingNode(Node):
         segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)
 
         if results[0].masks is None:
+            self.log_segmentation_debug(image, 0, 0)
             return segmentation_map
 
         masks = results[0].masks.data.cpu().numpy()
@@ -247,7 +239,27 @@ class ObjectTrackingNode(Node):
                 )
             segmentation_map[mask.astype(bool)] = label
 
+        self.log_segmentation_debug(image, len(masks), int(np.count_nonzero(segmentation_map)))
         return segmentation_map
+
+    def log_segmentation_debug(
+        self,
+        image: Image,
+        mask_count: int,
+        foreground_pixels: int,
+    ) -> None:
+        if not self.debug:
+            return
+
+        self.debug_inference_count += 1
+        if self.debug_inference_count % 10 != 1:
+            return
+
+        self.get_logger().info(
+            f"YOLOE prompt '{self.current_object_prompt}': "
+            f"{mask_count} masks, {foreground_pixels} foreground pixels "
+            f"on {image.width}x{image.height}"
+        )
 
     def image_to_bgr(self, image: Image) -> np.ndarray:
         row_bytes = image.width * 3
