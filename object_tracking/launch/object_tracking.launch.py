@@ -8,6 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     params_file = LaunchConfiguration('params_file')
+    namespace = LaunchConfiguration('namespace')
     image_topic = LaunchConfiguration('image_topic')
     pointcloud_topic = LaunchConfiguration('pointcloud_topic')
     debug = LaunchConfiguration('debug')
@@ -19,6 +20,11 @@ def generate_launch_description():
     ])
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'namespace',
+            default_value='',
+            description='Top-level namespace for the object tracking node'
+        ),
         DeclareLaunchArgument(
             'params_file',
             default_value=default_params_file,
@@ -48,6 +54,7 @@ def generate_launch_description():
             package='object_tracking',
             executable='object_tracking_py',
             name='object_tracking_server',
+            namespace=namespace,
             parameters=[
                 params_file,
                 {

@@ -5,7 +5,7 @@ Install ONNX Runtime C++ and set `ONNXRUNTIME_ROOT` if CMake cannot find it auto
 
 Start object tracking plugin with:
 ```
-ros2 launch object_tracking object_tracking.launch.py
+ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1
 ```
 
 Send service request over terminal with:
@@ -15,7 +15,7 @@ ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking 
 
 Example:
 ```
-ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'grey eurobox EG 3212', reference_frame: 'base_link', distance_threshold: 10.0, object_tf_name: 'manipulation_target'}"
+ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'grey eurobox EG 3212', reference_frame: 'base_link', distance_threshold: 10.0, object_tf_name: 'manipulation_target'}"
 ```
 
 enable:             turns the tool on (if all other parameters are set) or off (enough if enable == false)
