@@ -9,6 +9,6 @@
     min_mask_points: 20
     segmentation_model_path: yoloe-26n-seg.onnx
     segmentation_target_size: 640
-    segmentation_confidence: 0.15
+    segmentation_confidence: 0.2
     segmentation_iou: 0.5
     debug_image_path: /tmp/object_tracking_latest_image.ppm
