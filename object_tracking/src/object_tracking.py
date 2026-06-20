@@ -83,6 +83,11 @@ class ObjectTrackingNode(Node):
             .get_parameter_value()
             .bool_value
         )
+        self.segmentation_confidence = (
+            self.declare_parameter("segmentation_confidence", 0.2)
+            .get_parameter_value()
+            .double_value
+        )
 
         self.latest_image: Optional[Image] = None
         self.latest_pointcloud: Optional[PointCloud2] = None
@@ -140,6 +145,9 @@ class ObjectTrackingNode(Node):
 
         self.get_logger().info(f"Subscribing to camera images on {self.image_topic}")
         self.get_logger().info(f"Subscribing to point cloud on {self.pointcloud_topic}")
+        self.get_logger().info(
+            f"Segmentation confidence threshold: {self.segmentation_confidence:.2f}"
+        )
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
         if self.debug:
@@ -404,7 +412,11 @@ class ObjectTrackingNode(Node):
     def create_segmentation_map(self, image: Image) -> np.ndarray:
         frame = self.image_to_bgr(image)
         with self.model_lock:
-            results = self.model(frame, verbose=False)
+            results = self.model(
+                frame,
+                conf=self.segmentation_confidence,
+                verbose=False,
+            )
         segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)
 
         if results[0].masks is None:
