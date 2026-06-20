@@ -3,10 +3,22 @@ The `object_tracking` node runs the ONNX segmentation model configured in `param
 
 Install ONNX Runtime C++ and set `ONNXRUNTIME_ROOT` if CMake cannot find it automatically.
 
+---
 Start object tracking plugin with:
 ```
 ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1
 ```
+
+If you want to capture images:
+```
+ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 capture:=true
+```
+
+If you want to visualize the segmented image in rviz:
+```
+ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 debug:=true
+```
+---
 
 Send service request over terminal with:
 ```
