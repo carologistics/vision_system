@@ -88,13 +88,13 @@ class ObjectTrackingNode(Node):
             .get_parameter_value()
             .double_value
         )
+        self.target_parent_frame = self.namespaced_frame("gripper_cam")
 
         self.latest_image: Optional[Image] = None
         self.latest_pointcloud: Optional[PointCloud2] = None
         self.latest_segmentation_map: Optional[np.ndarray] = None
         self.tracking_active = False
         self.current_object_prompt = ""
-        self.current_reference_frame = ""
         self.current_object_tf_name = DEFAULT_OBJECT_TF_NAME
         self.debug_inference_count = 0
         self.capture_frame_count = 0
@@ -148,6 +148,9 @@ class ObjectTrackingNode(Node):
         self.get_logger().info(
             f"Segmentation confidence threshold: {self.segmentation_confidence:.2f}"
         )
+        self.get_logger().info(
+            f"Target parent TF frame: {self.target_parent_frame}"
+        )
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
         if self.debug:
@@ -156,6 +159,15 @@ class ObjectTrackingNode(Node):
             )
         if self.capture:
             self.get_logger().info(f"Capture images will be saved to {CAPTURE_DIR}")
+
+    def namespaced_frame(self, frame_name: str) -> str:
+        frame_name = frame_name.strip("/")
+        namespace = self.get_namespace().strip("/")
+        if namespace and not (
+            frame_name == namespace or frame_name.startswith(f"{namespace}/")
+        ):
+            return f"{namespace}/{frame_name}"
+        return frame_name
 
     def handle_image(self, msg: Image) -> None:
         with self.data_lock:
@@ -180,7 +192,6 @@ class ObjectTrackingNode(Node):
 
             with self.data_lock:
                 self.current_object_prompt = request.object_prompt
-                self.current_reference_frame = request.reference_frame
                 self.current_object_tf_name = (
                     request.object_tf_name or DEFAULT_OBJECT_TF_NAME
                 )
@@ -200,7 +211,6 @@ class ObjectTrackingNode(Node):
                 tracking_active = self.tracking_active
                 image = self.latest_image
                 pointcloud = self.latest_pointcloud
-                reference_frame = self.current_reference_frame
                 object_tf_name = self.current_object_tf_name
 
             if not tracking_active or image is None or pointcloud is None:
@@ -217,7 +227,6 @@ class ObjectTrackingNode(Node):
                     self.create_target_transform(
                         pointcloud,
                         average_position,
-                        reference_frame,
                         object_tf_name,
                     )
                 )
@@ -335,13 +344,12 @@ class ObjectTrackingNode(Node):
         self,
         pointcloud: PointCloud2,
         position: np.ndarray,
-        reference_frame: str,
         object_tf_name: str,
     ) -> TransformStamped:
         transform = TransformStamped()
         transform.header.stamp = pointcloud.header.stamp
-        transform.header.frame_id = pointcloud.header.frame_id or reference_frame
-        transform.child_frame_id = object_tf_name
+        transform.header.frame_id = self.target_parent_frame
+        transform.child_frame_id = self.namespaced_frame(object_tf_name)
         transform.transform.translation.x = float(position[0])
         transform.transform.translation.y = float(position[1])
         transform.transform.translation.z = float(position[2])
