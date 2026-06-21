@@ -17,9 +17,10 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.time import Time
 from robotino_vision_msgs.srv import ToggleObjectTracking
 from sensor_msgs.msg import Image, PointCloud2, PointField
-from tf2_ros import TransformBroadcaster
+from tf2_ros import Buffer, TransformBroadcaster, TransformListener
 import ultralytics
 from ultralytics.utils import downloads as ultralytics_downloads
 from ultralytics import YOLOE
@@ -95,6 +96,8 @@ class ObjectTrackingNode(Node):
         self.latest_segmentation_map: Optional[np.ndarray] = None
         self.tracking_active = False
         self.current_object_prompt = ""
+        self.current_reference_frame = self.namespaced_frame("base_link")
+        self.current_distance_threshold = 10.0
         self.current_object_tf_name = DEFAULT_OBJECT_TF_NAME
         self.debug_inference_count = 0
         self.capture_frame_count = 0
@@ -136,6 +139,8 @@ class ObjectTrackingNode(Node):
             callback_group=self.sensor_callback_group,
         )
         self.target_transform_broadcaster = TransformBroadcaster(self)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.update_thread = Thread(
             target=self.update_pose,
             name="object_tracking_update_pose",
@@ -192,6 +197,9 @@ class ObjectTrackingNode(Node):
 
             with self.data_lock:
                 self.current_object_prompt = request.object_prompt
+                reference_frame = request.reference_frame or "base_link"
+                self.current_reference_frame = self.namespaced_frame(reference_frame)
+                self.current_distance_threshold = request.distance_threshold
                 self.current_object_tf_name = (
                     request.object_tf_name or DEFAULT_OBJECT_TF_NAME
                 )
@@ -211,6 +219,8 @@ class ObjectTrackingNode(Node):
                 tracking_active = self.tracking_active
                 image = self.latest_image
                 pointcloud = self.latest_pointcloud
+                reference_frame = self.current_reference_frame
+                distance_threshold = self.current_distance_threshold
                 object_tf_name = self.current_object_tf_name
 
             if not tracking_active or image is None or pointcloud is None:
@@ -221,15 +231,26 @@ class ObjectTrackingNode(Node):
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
 
-            average_position = self.compute_average_position(segmentation_map, pointcloud)
-            if average_position is not None:
-                self.publish_target_transform(
-                    self.create_target_transform(
-                        pointcloud,
-                        average_position,
-                        object_tf_name,
-                    )
+            candidate_positions = self.compute_candidate_positions(
+                segmentation_map, pointcloud
+            )
+            if candidate_positions:
+                reference_position = self.reference_position(
+                    reference_frame, pointcloud.header.stamp
                 )
+                candidate_distances = [
+                    float(np.linalg.norm(position - reference_position))
+                    for position in candidate_positions
+                ]
+                closest_index = int(np.argmin(candidate_distances))
+                if candidate_distances[closest_index] <= distance_threshold:
+                    self.publish_target_transform(
+                        self.create_target_transform(
+                            pointcloud,
+                            candidate_positions[closest_index],
+                            object_tf_name,
+                        )
+                    )
 
             if self.debug or self.capture:
                 segmentation_overlay = self.create_segmentation_overlay(image, segmentation_map)
@@ -260,37 +281,53 @@ class ObjectTrackingNode(Node):
 
         return overlay
 
-    def compute_average_position(
+    def compute_candidate_positions(
         self,
         segmentation_map: np.ndarray,
         pointcloud: PointCloud2,
-    ) -> Optional[np.ndarray]:
-        mask = self.resize_segmentation_mask_to_pointcloud(segmentation_map, pointcloud)
-        if not np.any(mask):
-            return None
-
+    ) -> list[np.ndarray]:
         points = self.pointcloud_xyz(pointcloud)
-        valid_points = (
-            mask
-            & np.isfinite(points).all(axis=2)
-            & (np.abs(points).sum(axis=2) > np.finfo(np.float32).eps)
-        )
-        if not np.any(valid_points):
-            return None
+        candidate_positions = []
 
-        return points[valid_points].mean(axis=0)
+        for label in np.unique(segmentation_map):
+            if label == 0:
+                continue
+
+            mask = self.resize_segmentation_mask_to_pointcloud(
+                segmentation_map == label, pointcloud
+            )
+            valid_points = (
+                mask
+                & np.isfinite(points).all(axis=2)
+                & (np.abs(points).sum(axis=2) > np.finfo(np.float32).eps)
+            )
+            if np.any(valid_points):
+                candidate_positions.append(points[valid_points].mean(axis=0))
+
+        return candidate_positions
 
     def resize_segmentation_mask_to_pointcloud(
         self,
-        segmentation_map: np.ndarray,
+        segmentation_mask: np.ndarray,
         pointcloud: PointCloud2,
     ) -> np.ndarray:
-        foreground_mask = (segmentation_map > 0).astype(np.uint8)
         return cv2.resize(
-            foreground_mask,
+            segmentation_mask.astype(np.uint8),
             (pointcloud.width, pointcloud.height),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
+
+    def reference_position(self, reference_frame: str, stamp) -> np.ndarray:
+        reference_transform = self.tf_buffer.lookup_transform(
+            self.target_parent_frame,
+            reference_frame,
+            Time.from_msg(stamp),
+        )
+        translation = reference_transform.transform.translation
+        return np.array(
+            [translation.x, translation.y, translation.z],
+            dtype=np.float32,
+        )
 
     def pointcloud_xyz(self, pointcloud: PointCloud2) -> np.ndarray:
         x_field = self.find_point_field(pointcloud, "x")
