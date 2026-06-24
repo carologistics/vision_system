@@ -98,6 +98,7 @@ class ObjectTrackingNode(Node):
         self.current_object_prompt = ""
         self.current_reference_frame = self.namespaced_frame("base_link")
         self.current_distance_threshold = 10.0
+        self.current_segmentation_confidence = self.segmentation_confidence
         self.current_object_tf_name = DEFAULT_OBJECT_TF_NAME
         self.debug_inference_count = 0
         self.capture_frame_count = 0
@@ -188,7 +189,17 @@ class ObjectTrackingNode(Node):
         response: ToggleObjectTracking.Response,
     ) -> ToggleObjectTracking.Response:
         if request.enable:
-            print(f"Enabling object tracking for: {request.object_prompt}", flush=True)
+            requested_confidence = request.segmentation_confidence
+            if requested_confidence < 0.0 or requested_confidence > 1.0:
+                response.success = False
+                response.error = "segmentation_confidence must be in the range (0.0, 1.0]"
+                return response
+
+            print(
+                f"Enabling object tracking for: {request.object_prompt} "
+                f"with confidence {requested_confidence:.2f}",
+                flush=True,
+            )
             with self.data_lock:
                 self.tracking_active = False
 
@@ -200,6 +211,7 @@ class ObjectTrackingNode(Node):
                 reference_frame = request.reference_frame or "base_link"
                 self.current_reference_frame = self.namespaced_frame(reference_frame)
                 self.current_distance_threshold = request.distance_threshold
+                self.current_segmentation_confidence = requested_confidence
                 self.current_object_tf_name = (
                     request.object_tf_name or DEFAULT_OBJECT_TF_NAME
                 )
@@ -221,13 +233,14 @@ class ObjectTrackingNode(Node):
                 pointcloud = self.latest_pointcloud
                 reference_frame = self.current_reference_frame
                 distance_threshold = self.current_distance_threshold
+                segmentation_confidence = self.current_segmentation_confidence
                 object_tf_name = self.current_object_tf_name
 
             if not tracking_active or image is None or pointcloud is None:
                 sleep(0.01)
                 continue
 
-            segmentation_map = self.create_segmentation_map(image)
+            segmentation_map = self.create_segmentation_map(image, segmentation_confidence)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
 
@@ -454,12 +467,16 @@ class ObjectTrackingNode(Node):
         msg.data = image.tobytes()
         return msg
 
-    def create_segmentation_map(self, image: Image) -> np.ndarray:
+    def create_segmentation_map(
+        self,
+        image: Image,
+        segmentation_confidence: float,
+    ) -> np.ndarray:
         frame = self.image_to_bgr(image)
         with self.model_lock:
             results = self.model(
                 frame,
-                conf=self.segmentation_confidence,
+                conf=segmentation_confidence,
                 verbose=False,
             )
         segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)

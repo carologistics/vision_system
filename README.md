@@ -22,12 +22,12 @@ ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 d
 
 Send service request over terminal with:
 ```
-ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: bool, object_prompt: 'OBJECT PROMPT', reference_frame: 'frame_name', distance_threshold: x.y, object_tf_name: 'name'}"
+ros2 service call object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: bool, object_prompt: 'OBJECT PROMPT', reference_frame: 'frame_name', distance_threshold: x.y, segmentation_confidence: 0.2, object_tf_name: 'name'}"
 ```
 
 Example:
 ```
-ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'grey eurobox EG 3212', reference_frame: 'base_link', distance_threshold: 10.0, object_tf_name: 'manipulation_target'}"
+ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'grey eurobox EG 3212', reference_frame: 'base_link', distance_threshold: 10.0, segmentation_confidence: 0.2, object_tf_name: 'tracked_object'}"
 ```
 
 enable:             turns the tool on (if all other parameters are set) or off (enough if enable == false)
@@ -36,6 +36,8 @@ object_prompt:      free-text object prompt for YOLOE, for example 'red workpiec
 
 reference_frame:    name for the expected pose of the object
 
-distance_threshold: aceptable distance between expected pose and detected object pose in meter
+distance_threshold: acceptable distance between expected pose and detected object pose in meter
+
+segmentation_confidence: YOLO segmentation confidence threshold for this tracking request. Use 0.0 to keep the configured default.
 
 object_tf_name:     name the resulting object by any string
