@@ -33,6 +33,16 @@ DEFAULT_OBJECT_TF_NAME = "tracked_object"
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
 
+# OpenCV HSV uses hue in [0, 179]. Saturation/value lower bounds keep low-color
+# grey or shadowed pixels from matching arbitrary hues.
+COLOR_HSV_INTERVALS = {
+    "blue": (((95, 50, 40), (130, 255, 255)),),
+    "green": (((40, 45, 35), (85, 255, 255)),),
+    "red": (((0, 60, 35), (10, 255, 255)), ((170, 60, 35), (179, 255, 255))),
+    "yellow": (((18, 55, 45), (40, 255, 255)),),
+}
+VALID_TARGET_COLORS = tuple(sorted(COLOR_HSV_INTERVALS))
+
 
 def block_ultralytics_downloads(*args, **kwargs):
     url = kwargs.get("url", args[0] if args else "unknown URL")
@@ -96,6 +106,7 @@ class ObjectTrackingNode(Node):
         self.latest_segmentation_map: Optional[np.ndarray] = None
         self.tracking_active = False
         self.current_object_prompt = ""
+        self.current_target_color = ""
         self.current_reference_frame = self.namespaced_frame("base_link")
         self.current_distance_threshold = 10.0
         self.current_segmentation_confidence = self.segmentation_confidence
@@ -195,9 +206,23 @@ class ObjectTrackingNode(Node):
                 response.error = "segmentation_confidence must be in the range (0.0, 1.0]"
                 return response
 
+            requested_target_color = request.target_color.strip().lower()
+            if requested_target_color and requested_target_color not in COLOR_HSV_INTERVALS:
+                response.success = False
+                response.error = (
+                    "target_color must be empty or one of: "
+                    + ", ".join(VALID_TARGET_COLORS)
+                )
+                return response
+
+            target_color_msg = (
+                f", target_color {requested_target_color}"
+                if requested_target_color
+                else ""
+            )
             print(
                 f"Enabling object tracking for: {request.object_prompt} "
-                f"with confidence {requested_confidence:.2f}",
+                f"with confidence {requested_confidence:.2f}{target_color_msg}",
                 flush=True,
             )
             with self.data_lock:
@@ -208,6 +233,7 @@ class ObjectTrackingNode(Node):
 
             with self.data_lock:
                 self.current_object_prompt = request.object_prompt
+                self.current_target_color = requested_target_color
                 reference_frame = request.reference_frame or "base_link"
                 self.current_reference_frame = self.namespaced_frame(reference_frame)
                 self.current_distance_threshold = request.distance_threshold
@@ -234,13 +260,16 @@ class ObjectTrackingNode(Node):
                 reference_frame = self.current_reference_frame
                 distance_threshold = self.current_distance_threshold
                 segmentation_confidence = self.current_segmentation_confidence
+                target_color = self.current_target_color
                 object_tf_name = self.current_object_tf_name
 
             if not tracking_active or image is None or pointcloud is None:
                 sleep(0.01)
                 continue
 
-            segmentation_map = self.create_segmentation_map(image, segmentation_confidence)
+            segmentation_map = self.create_segmentation_map(
+                image, segmentation_confidence, target_color
+            )
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
 
@@ -471,6 +500,7 @@ class ObjectTrackingNode(Node):
         self,
         image: Image,
         segmentation_confidence: float,
+        target_color: str,
     ) -> np.ndarray:
         frame = self.image_to_bgr(image)
         with self.model_lock:
@@ -482,12 +512,13 @@ class ObjectTrackingNode(Node):
         segmentation_map = np.zeros((image.height, image.width), dtype=np.uint8)
 
         if results[0].masks is None:
-            self.log_segmentation_debug(image, 0, 0)
+            self.log_segmentation_debug(image, 0, 0, 0, target_color)
             return segmentation_map
 
         masks = results[0].masks.data.cpu().numpy()
-        for label, mask in enumerate(masks, start=1):
-            if label > 255:
+        next_label = 1
+        for mask in masks:
+            if next_label > 255:
                 break
             if mask.shape != segmentation_map.shape:
                 mask = cv2.resize(
@@ -495,16 +526,60 @@ class ObjectTrackingNode(Node):
                     (image.width, image.height),
                     interpolation=cv2.INTER_NEAREST,
                 )
-            segmentation_map[mask.astype(bool)] = label
+            mask_bool = mask.astype(bool)
+            if target_color and not self.mask_matches_target_color(
+                frame, mask_bool, target_color
+            ):
+                continue
+            segmentation_map[mask_bool] = next_label
+            next_label += 1
 
-        self.log_segmentation_debug(image, len(masks), int(np.count_nonzero(segmentation_map)))
+        accepted_mask_count = next_label - 1
+        self.log_segmentation_debug(
+            image,
+            len(masks),
+            accepted_mask_count,
+            int(np.count_nonzero(segmentation_map)),
+            target_color,
+        )
         return segmentation_map
+
+    def mask_matches_target_color(
+        self,
+        frame_bgr: np.ndarray,
+        mask: np.ndarray,
+        target_color: str,
+    ) -> bool:
+        pixels_bgr = frame_bgr[mask]
+        if pixels_bgr.size == 0:
+            return False
+
+        median_bgr = np.median(pixels_bgr, axis=0).astype(np.uint8).reshape(1, 1, 3)
+        median_hsv = cv2.cvtColor(median_bgr, cv2.COLOR_BGR2HSV)[0, 0]
+
+        return any(
+            self.hsv_in_interval(median_hsv, lower, upper)
+            for lower, upper in COLOR_HSV_INTERVALS[target_color]
+        )
+
+    @staticmethod
+    def hsv_in_interval(
+        hsv: np.ndarray,
+        lower: tuple[int, int, int],
+        upper: tuple[int, int, int],
+    ) -> bool:
+        return all(
+            int(low) <= int(value) <= int(high)
+            for value, low, high in zip(hsv, lower, upper)
+        )
 
     def log_segmentation_debug(
         self,
         image: Image,
         mask_count: int,
+        accepted_mask_count: int,
         foreground_pixels: int,
+        target_color: str,
     ) -> None:
         if not self.debug:
             return
@@ -513,9 +588,11 @@ class ObjectTrackingNode(Node):
         if self.debug_inference_count % 10 != 1:
             return
 
+        target_color_msg = f", target color '{target_color}'" if target_color else ""
         self.get_logger().info(
             f"YOLOE prompt '{self.current_object_prompt}': "
-            f"{mask_count} masks, {foreground_pixels} foreground pixels "
+            f"{mask_count} masks, {accepted_mask_count} accepted"
+            f"{target_color_msg}, {foreground_pixels} foreground pixels "
             f"on {image.width}x{image.height}"
         )
 
