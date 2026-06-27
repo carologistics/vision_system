@@ -32,7 +32,7 @@ ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/Toggle
 
 Track a yellow lego brick with color filtering:
 ```
-ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'toy brick', reference_frame: 'base_link', distance_threshold: 10.0, segmentation_confidence: 0.2, target_color: 'yellow', object_tf_name: 'tracked_object'}"
+ros2 service call /robotinobase1/object_tracking robotino_vision_msgs/srv/ToggleObjectTracking "{enable: true, object_prompt: 'toy brick', reference_frame: 'base_link', distance_threshold: 10.0, segmentation_confidence: 0.1, target_color: 'yellow', object_tf_name: 'tracked_object'}"
 ```
 
 enable:             turns the tool on (if all other parameters are set) or off (enough if enable == false)
