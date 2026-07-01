@@ -99,6 +99,16 @@ class ObjectTrackingNode(Node):
             .get_parameter_value()
             .double_value
         )
+        self.segmentation_height_fraction = (
+            self.declare_parameter("segmentation_height_fraction", 0.4)
+            .get_parameter_value()
+            .double_value
+        )
+        if not 0.0 <= self.segmentation_height_fraction <= 1.0:
+            raise ValueError(
+                "segmentation_height_fraction must be in [0.0, 1.0] "
+                f"but is {self.segmentation_height_fraction}"
+            )
         self.target_parent_frame = self.namespaced_frame("gripper_cam")
 
         self.latest_image: Optional[Image] = None
@@ -164,6 +174,10 @@ class ObjectTrackingNode(Node):
         self.get_logger().info(f"Subscribing to point cloud on {self.pointcloud_topic}")
         self.get_logger().info(
             f"Segmentation confidence threshold: {self.segmentation_confidence:.2f}"
+        )
+        self.get_logger().info(
+            "Segmentation height ROI: "
+            f"top {self.segmentation_height_fraction * 100.0:.1f}% of the image"
         )
         self.get_logger().info(
             f"Target parent TF frame: {self.target_parent_frame}"
@@ -270,6 +284,7 @@ class ObjectTrackingNode(Node):
             segmentation_map = self.create_segmentation_map(
                 image, segmentation_confidence, target_color
             )
+            segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
 
@@ -322,6 +337,14 @@ class ObjectTrackingNode(Node):
             overlay[mask] = (0.5 * frame[mask] + 0.5 * ORANGE_BGR).astype(np.uint8)
 
         return overlay
+
+    def apply_segmentation_height_cut(self, segmentation_map: np.ndarray) -> np.ndarray:
+        cutoff_row = int(
+            np.ceil(segmentation_map.shape[0] * self.segmentation_height_fraction)
+        )
+        filtered_map = segmentation_map.copy()
+        filtered_map[cutoff_row:, :] = 0
+        return filtered_map
 
     def compute_candidate_positions(
         self,

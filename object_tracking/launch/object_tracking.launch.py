@@ -11,6 +11,7 @@ def generate_launch_description():
     namespace = LaunchConfiguration('namespace')
     image_topic = LaunchConfiguration('image_topic')
     pointcloud_topic = LaunchConfiguration('pointcloud_topic')
+    segmentation_height_fraction = LaunchConfiguration('segmentation_height_fraction')
     debug = LaunchConfiguration('debug')
     capture = LaunchConfiguration('capture')
     default_params_file = PathJoinSubstitution([
@@ -41,6 +42,11 @@ def generate_launch_description():
             description='Organized camera point cloud topic'
         ),
         DeclareLaunchArgument(
+            'segmentation_height_fraction',
+            default_value='0.4',
+            description='Keep only this top fraction of the image for segmentation results'
+        ),
+        DeclareLaunchArgument(
             'debug',
             default_value='false',
             description='Publish segmented debug image for RViz'
@@ -60,6 +66,10 @@ def generate_launch_description():
                 {
                     'image_topic': image_topic,
                     'pointcloud_topic': pointcloud_topic,
+                    'segmentation_height_fraction': ParameterValue(
+                        segmentation_height_fraction,
+                        value_type=float,
+                    ),
                     'debug': ParameterValue(debug, value_type=bool),
                     'capture': ParameterValue(capture, value_type=bool),
                 },

@@ -18,6 +18,11 @@ If you want to visualize the segmented image in rviz:
 ```
 ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 debug:=true
 ```
+
+Limit segmentation results to the top part of the image:
+```
+ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 segmentation_height_fraction:=0.4
+```
 ---
 
 Send service request over terminal with:
@@ -44,6 +49,8 @@ reference_frame:    name for the expected pose of the object
 distance_threshold: acceptable distance between expected pose and detected object pose in meter
 
 segmentation_confidence: YOLO segmentation confidence threshold for this tracking request. Use 0.0 to keep the configured default.
+
+segmentation_height_fraction: fraction of the image height kept from the top, in [0.0, 1.0]. Pixels below this row are discarded before 3D point selection.
 
 target_color:      optional mask color filter. Empty disables filtering; supported values are green, blue, red, and yellow.
 
