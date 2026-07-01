@@ -100,7 +100,7 @@ class ObjectTrackingNode(Node):
             .double_value
         )
         self.segmentation_height_fraction = (
-            self.declare_parameter("segmentation_height_fraction", 0.4)
+            self.declare_parameter("segmentation_height_fraction", 0.65)
             .get_parameter_value()
             .double_value
         )

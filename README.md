@@ -21,7 +21,7 @@ ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 d
 
 Limit segmentation results to the top part of the image:
 ```
-ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 segmentation_height_fraction:=0.4
+ros2 launch object_tracking object_tracking.launch.py namespace:=robotinobase1 segmentation_height_fraction:=0.65
 ```
 ---
 
