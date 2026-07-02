@@ -12,6 +12,7 @@ def generate_launch_description():
     image_topic = LaunchConfiguration('image_topic')
     pointcloud_topic = LaunchConfiguration('pointcloud_topic')
     segmentation_height_fraction = LaunchConfiguration('segmentation_height_fraction')
+    approach_distance = LaunchConfiguration('approach_distance')
     debug = LaunchConfiguration('debug')
     capture = LaunchConfiguration('capture')
     default_params_file = PathJoinSubstitution([
@@ -47,6 +48,11 @@ def generate_launch_description():
             description='Keep only this top fraction of the image for segmentation results'
         ),
         DeclareLaunchArgument(
+            'approach_distance',
+            default_value='0.35',
+            description='Distance to keep between the base_link approach frame and the object'
+        ),
+        DeclareLaunchArgument(
             'debug',
             default_value='false',
             description='Publish segmented debug image for RViz'
@@ -68,6 +74,10 @@ def generate_launch_description():
                     'pointcloud_topic': pointcloud_topic,
                     'segmentation_height_fraction': ParameterValue(
                         segmentation_height_fraction,
+                        value_type=float,
+                    ),
+                    'approach_distance': ParameterValue(
+                        approach_distance,
                         value_type=float,
                     ),
                     'debug': ParameterValue(debug, value_type=bool),

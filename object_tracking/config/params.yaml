@@ -11,5 +11,7 @@
     segmentation_target_size: 640
     segmentation_confidence: 0.2
     segmentation_height_fraction: 0.4
+    approach_distance: 0.35
+    approach_frame_suffix: _approach
     segmentation_iou: 0.5
     debug_image_path: /tmp/object_tracking_latest_image.ppm

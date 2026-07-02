@@ -109,6 +109,24 @@ class ObjectTrackingNode(Node):
                 "segmentation_height_fraction must be in [0.0, 1.0] "
                 f"but is {self.segmentation_height_fraction}"
             )
+        self.approach_distance = (
+            self.declare_parameter("approach_distance", 0.35)
+            .get_parameter_value()
+            .double_value
+        )
+        if self.approach_distance < 0.0:
+            raise ValueError(
+                "approach_distance must be >= 0.0 "
+                f"but is {self.approach_distance}"
+            )
+        self.approach_frame_suffix = (
+            self.declare_parameter("approach_frame_suffix", "_approach")
+            .get_parameter_value()
+            .string_value
+        )
+        if not self.approach_frame_suffix:
+            raise ValueError("approach_frame_suffix must not be empty")
+        self.base_frame = self.namespaced_frame("base_link")
         self.target_parent_frame = self.namespaced_frame("gripper_cam")
 
         self.latest_image: Optional[Image] = None
@@ -117,7 +135,7 @@ class ObjectTrackingNode(Node):
         self.tracking_active = False
         self.current_object_prompt = ""
         self.current_target_color = ""
-        self.current_reference_frame = self.namespaced_frame("base_link")
+        self.current_reference_frame = self.base_frame
         self.current_distance_threshold = 10.0
         self.current_segmentation_confidence = self.segmentation_confidence
         self.current_object_tf_name = DEFAULT_OBJECT_TF_NAME
@@ -181,6 +199,11 @@ class ObjectTrackingNode(Node):
         )
         self.get_logger().info(
             f"Target parent TF frame: {self.target_parent_frame}"
+        )
+        self.get_logger().info(
+            "Object approach TF: "
+            f"parent={self.base_frame} suffix={self.approach_frame_suffix} "
+            f"distance={self.approach_distance:.3f} m"
         )
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
@@ -301,13 +324,21 @@ class ObjectTrackingNode(Node):
                 ]
                 closest_index = int(np.argmin(candidate_distances))
                 if candidate_distances[closest_index] <= distance_threshold:
+                    object_position = candidate_positions[closest_index]
                     self.publish_target_transform(
                         self.create_target_transform(
                             pointcloud,
-                            candidate_positions[closest_index],
+                            object_position,
                             object_tf_name,
                         )
                     )
+                    approach_transform = self.create_approach_transform(
+                        pointcloud,
+                        object_position,
+                        object_tf_name,
+                    )
+                    if approach_transform is not None:
+                        self.publish_target_transform(approach_transform)
 
             if self.debug or self.capture:
                 segmentation_overlay = self.create_segmentation_overlay(image, segmentation_map)
@@ -457,6 +488,87 @@ class ObjectTrackingNode(Node):
         transform.transform.translation.z = float(position[2])
         transform.transform.rotation.w = 1.0
         return transform
+
+    def create_approach_transform(
+        self,
+        pointcloud: PointCloud2,
+        object_position: np.ndarray,
+        object_tf_name: str,
+    ) -> Optional[TransformStamped]:
+        try:
+            object_in_base = self.transform_position(
+                object_position,
+                self.target_parent_frame,
+                self.base_frame,
+                pointcloud.header.stamp,
+            )
+        except Exception as exc:
+            self.get_logger().warn(
+                "Could not create approach TF from "
+                f"{self.base_frame} to {object_tf_name}: {exc}"
+            )
+            return None
+
+        object_xy = object_in_base[:2].astype(np.float64, copy=False)
+        object_distance = float(np.linalg.norm(object_xy))
+        if object_distance <= np.finfo(np.float64).eps:
+            approach_xy = object_xy
+        else:
+            target_distance = max(object_distance - self.approach_distance, 0.0)
+            approach_xy = object_xy * (target_distance / object_distance)
+
+        transform = TransformStamped()
+        transform.header.stamp = pointcloud.header.stamp
+        transform.header.frame_id = self.base_frame
+        transform.child_frame_id = self.namespaced_frame(
+            f"{object_tf_name}{self.approach_frame_suffix}"
+        )
+        transform.transform.translation.x = float(approach_xy[0])
+        transform.transform.translation.y = float(approach_xy[1])
+        transform.transform.translation.z = 0.0
+        transform.transform.rotation.w = 1.0
+        return transform
+
+    def transform_position(
+        self,
+        position: np.ndarray,
+        source_frame: str,
+        target_frame: str,
+        stamp,
+    ) -> np.ndarray:
+        transform = self.tf_buffer.lookup_transform(
+            target_frame,
+            source_frame,
+            Time.from_msg(stamp),
+        )
+        rotation = self.quaternion_to_rotation_matrix(transform.transform.rotation)
+        translation = transform.transform.translation
+        return rotation @ position.astype(np.float64, copy=False) + np.array(
+            [translation.x, translation.y, translation.z],
+            dtype=np.float64,
+        )
+
+    def quaternion_to_rotation_matrix(self, quaternion) -> np.ndarray:
+        x = float(quaternion.x)
+        y = float(quaternion.y)
+        z = float(quaternion.z)
+        w = float(quaternion.w)
+        norm = np.sqrt(x * x + y * y + z * z + w * w)
+        if norm <= np.finfo(np.float64).eps:
+            return np.eye(3, dtype=np.float64)
+
+        x /= norm
+        y /= norm
+        z /= norm
+        w /= norm
+        return np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=np.float64,
+        )
 
     def publish_segmented_image(self, image: Image, segmentation_overlay: np.ndarray) -> None:
         if self.segmented_image_publisher is None:
