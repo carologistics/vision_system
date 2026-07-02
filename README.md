@@ -52,7 +52,7 @@ segmentation_confidence: YOLO segmentation confidence threshold for this trackin
 
 segmentation_height_fraction: fraction of the image height kept from the top, in [0.0, 1.0]. Pixels below this row are discarded before 3D point selection.
 
-approach_distance: configured node parameter, default 0.35 m. The tracker also publishes `{object_tf_name}_approach` as a child of `base_link`, flattened to z=0 and placed this far from the object along the base-to-object line.
+approach_distance: configured node parameter, default 0.35 m. The tracker also publishes `{object_tf_name}_approach` as a child of `base_link`, flattened to z=0 and placed this far from the object along the base-to-object line. Its +X axis points toward the tracked object, so yaw=0 in this frame makes the robot face the object.
 
 target_color:      optional mask color filter. Empty disables filtering; supported values are green, blue, red, and yellow.
 

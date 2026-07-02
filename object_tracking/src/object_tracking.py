@@ -523,10 +523,15 @@ class ObjectTrackingNode(Node):
         transform.child_frame_id = self.namespaced_frame(
             f"{object_tf_name}{self.approach_frame_suffix}"
         )
+        yaw_to_object = 0.0
+        if object_distance > np.finfo(np.float64).eps:
+            yaw_to_object = float(np.arctan2(object_xy[1], object_xy[0]))
+
         transform.transform.translation.x = float(approach_xy[0])
         transform.transform.translation.y = float(approach_xy[1])
         transform.transform.translation.z = 0.0
-        transform.transform.rotation.w = 1.0
+        transform.transform.rotation.z = float(np.sin(0.5 * yaw_to_object))
+        transform.transform.rotation.w = float(np.cos(0.5 * yaw_to_object))
         return transform
 
     def transform_position(
