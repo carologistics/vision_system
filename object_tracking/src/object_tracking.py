@@ -286,10 +286,13 @@ class ObjectTrackingNode(Node):
 
         response.success = True
         response.error = ""
+        print(1)
         return response
 
     def update_pose(self) -> None:
+        print(2)
         while rclpy.ok() and not self.stop_update_loop.is_set():
+            print(3)
             with self.data_lock:
                 tracking_active = self.tracking_active
                 image = self.latest_image
@@ -303,10 +306,11 @@ class ObjectTrackingNode(Node):
             if not tracking_active or image is None or pointcloud is None:
                 sleep(0.01)
                 continue
-
+            print(3.5)
             segmentation_map = self.create_segmentation_map(
                 image, segmentation_confidence, target_color
             )
+            print(4)
             segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
             with self.data_lock:
                 self.latest_segmentation_map = segmentation_map
@@ -314,6 +318,7 @@ class ObjectTrackingNode(Node):
             candidate_positions = self.compute_candidate_positions(
                 segmentation_map, pointcloud
             )
+            print(5)
             if candidate_positions:
                 reference_position = self.reference_position(
                     reference_frame, pointcloud.header.stamp
@@ -339,13 +344,14 @@ class ObjectTrackingNode(Node):
                     )
                     if approach_transform is not None:
                         self.publish_target_transform(approach_transform)
-
+            print(6)
             if self.debug or self.capture:
                 segmentation_overlay = self.create_segmentation_overlay(image, segmentation_map)
                 if self.debug:
                     self.publish_segmented_image(image, segmentation_overlay)
                 if self.capture:
                     self.save_capture_images(image, segmentation_overlay, segmentation_map)
+            print(7)
 
     def destroy_node(self) -> bool:
         self.stop_update_loop.set()
