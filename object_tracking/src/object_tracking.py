@@ -375,6 +375,8 @@ class ObjectTrackingNode(Node):
             "stable_frames": 0,
             "last_object_position": None,
             "last_object_distance": 0.0,
+            "last_debug_log_time": 0.0,
+            "last_debug_message": "",
             "success": False,
             "error": "",
         }
@@ -499,6 +501,16 @@ class ObjectTrackingNode(Node):
                     object_tf_name = self.current_object_tf_name
 
             if (not tracking_active and acquire_session is None) or image is None or pointcloud is None:
+                if acquire_session is not None:
+                    missing = []
+                    if image is None:
+                        missing.append(f"image on {self.image_topic}")
+                    if pointcloud is None:
+                        missing.append(f"pointcloud on {self.pointcloud_topic}")
+                    self.log_acquire_info(
+                        acquire_session,
+                        "waiting for " + " and ".join(missing),
+                    )
                 sleep(0.01)
                 continue
 
@@ -512,7 +524,7 @@ class ObjectTrackingNode(Node):
             candidate_positions = self.compute_candidate_positions(
                 segmentation_map, pointcloud
             )
-            selected_candidate = self.select_candidate_position(
+            selected_candidate, rejection_reason = self.select_candidate_position(
                 candidate_positions,
                 reference_frame,
                 pointcloud,
@@ -545,6 +557,7 @@ class ObjectTrackingNode(Node):
                         object_distance,
                     )
             elif acquire_session is not None:
+                self.log_acquire_info(acquire_session, rejection_reason)
                 self.reset_acquire_stability(acquire_session)
                 self.publish_acquire_feedback(acquire_session, False, 0, 0.0)
 
@@ -561,9 +574,9 @@ class ObjectTrackingNode(Node):
         reference_frame: str,
         pointcloud: PointCloud2,
         distance_threshold: float,
-    ) -> Optional[tuple[np.ndarray, float]]:
+    ) -> tuple[Optional[tuple[np.ndarray, float]], str]:
         if not candidate_positions:
-            return None
+            return None, "no usable detections from segmentation and pointcloud"
 
         reference_position = self.reference_position(
             reference_frame,
@@ -575,9 +588,28 @@ class ObjectTrackingNode(Node):
         ]
         closest_index = int(np.argmin(candidate_distances))
         closest_distance = candidate_distances[closest_index]
+        closest_position = candidate_positions[closest_index]
+        xy_distance = float(np.linalg.norm(closest_position[:2] - reference_position[:2]))
+        z_distance = float(abs(closest_position[2] - reference_position[2]))
         if closest_distance > distance_threshold:
-            return None
-        return candidate_positions[closest_index], closest_distance
+            return None, (
+                "closest detection too far: "
+                f"distance={closest_distance:.3f} m allowed={distance_threshold:.3f} m "
+                f"xy={xy_distance:.3f} m z_delta={z_distance:.3f} m "
+                f"candidates={len(candidate_positions)}"
+            )
+        return (closest_position, closest_distance), ""
+
+    def log_acquire_info(self, session, message: str, interval_sec: float = 1.0) -> None:
+        now = monotonic()
+        last_time = session.get("last_debug_log_time", 0.0)
+        last_message = session.get("last_debug_message", "")
+        if message == last_message and now - last_time < interval_sec:
+            return
+
+        session["last_debug_log_time"] = now
+        session["last_debug_message"] = message
+        self.get_logger().info(f"Object acquisition: {message}")
 
     def reset_acquire_stability(self, session) -> None:
         with self.data_lock:
@@ -636,6 +668,12 @@ class ObjectTrackingNode(Node):
         if acquired:
             session["event"].set()
 
+        self.log_acquire_info(
+            session,
+            "valid detection: "
+            f"distance={object_distance:.3f} m "
+            f"stable_frames={stable_frames}/{session['min_stable_frames']}",
+        )
         self.publish_acquire_feedback(
             session,
             True,
