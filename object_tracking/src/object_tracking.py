@@ -299,7 +299,7 @@ class ObjectTrackingNode(Node):
                 self.current_object_prompt = request.object_prompt
                 self.current_target_color = requested_target_color
                 reference_frame = request.reference_frame or "base_link"
-                self.current_reference_frame = self.namespaced_frame(reference_frame)
+                self.current_reference_frame = reference_frame
                 self.current_distance_threshold = request.distance_threshold
                 self.current_approach_distance = approach_distance
                 self.current_segmentation_confidence = requested_confidence
