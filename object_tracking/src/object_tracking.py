@@ -144,7 +144,6 @@ class ObjectTrackingNode(Node):
         self.current_segmentation_confidence = self.segmentation_confidence
         self.current_object_tf_name = DEFAULT_OBJECT_TF_NAME
         self.acquire_session = None
-        self.frozen_transforms = []
         self.debug_inference_count = 0
         self.capture_frame_count = 0
         self.data_lock = Lock()
@@ -193,11 +192,6 @@ class ObjectTrackingNode(Node):
             callback_group=self.sensor_callback_group,
         )
         self.target_transform_broadcaster = TransformBroadcaster(self)
-        self.frozen_transform_timer = self.create_timer(
-            0.1,
-            self.publish_frozen_transforms,
-            callback_group=self.sensor_callback_group,
-        )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.update_thread = Thread(
@@ -224,7 +218,7 @@ class ObjectTrackingNode(Node):
             f"parent={self.base_frame} suffix={self.approach_frame_suffix} "
             f"distance={self.approach_distance:.3f} m"
         )
-        self.get_logger().info(f"Acquired object TFs will be frozen in {self.odom_frame}")
+        self.get_logger().info(f"Acquired object TFs use parent frame {self.odom_frame}")
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Object acquisition action ready on acquire_object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
@@ -358,7 +352,6 @@ class ObjectTrackingNode(Node):
                 goal_handle.abort()
                 return result
             self.tracking_active = False
-            self.frozen_transforms = []
 
         with self.model_lock:
             self.model.set_classes([object_prompt])
@@ -536,14 +529,14 @@ class ObjectTrackingNode(Node):
                             object_tf_name,
                         )
                     )
-                    approach_transform = self.create_approach_transform(
-                        pointcloud,
-                        object_position,
-                        object_tf_name,
-                        approach_distance,
+                    self.publish_target_transform(
+                        self.create_approach_transform(
+                            pointcloud,
+                            object_position,
+                            object_tf_name,
+                            approach_distance,
+                        )
                     )
-                    if approach_transform is not None:
-                        self.publish_target_transform(approach_transform)
                 if acquire_session is not None:
                     self.update_acquire_session(
                         acquire_session,
@@ -601,7 +594,7 @@ class ObjectTrackingNode(Node):
         object_distance: float,
     ) -> None:
         try:
-            frozen_transforms, object_in_odom = self.create_frozen_target_transforms(
+            acquired_transforms, object_in_odom = self.create_acquired_target_transforms(
                 pointcloud,
                 object_position,
                 session["object_tf_name"],
@@ -609,7 +602,7 @@ class ObjectTrackingNode(Node):
                 session["approach_distance"],
             )
         except Exception as exc:
-            self.get_logger().warn(f"Could not freeze object acquisition TFs: {exc}")
+            self.get_logger().warn(f"Could not create object acquisition TFs: {exc}")
             self.reset_acquire_stability(session)
             self.publish_acquire_feedback(session, False, 0, object_distance)
             return
@@ -634,10 +627,14 @@ class ObjectTrackingNode(Node):
             session["last_object_distance"] = object_distance
             acquired = stable_frames >= session["min_stable_frames"]
             if acquired:
-                self.frozen_transforms = frozen_transforms
                 session["success"] = True
                 session["error"] = ""
-                session["event"].set()
+
+        for transform in acquired_transforms:
+            self.publish_target_transform(transform)
+
+        if acquired:
+            session["event"].set()
 
         self.publish_acquire_feedback(
             session,
@@ -850,7 +847,7 @@ class ObjectTrackingNode(Node):
         transform.transform.rotation.w = float(np.cos(0.5 * yaw_to_object))
         return transform
 
-    def create_frozen_target_transforms(
+    def create_acquired_target_transforms(
         self,
         pointcloud: PointCloud2,
         object_position: np.ndarray,
@@ -1114,17 +1111,6 @@ class ObjectTrackingNode(Node):
             .reshape(image.height, image.width, 3)
             .copy()
         )
-
-    def publish_frozen_transforms(self) -> None:
-        with self.data_lock:
-            transforms = list(self.frozen_transforms)
-        if not transforms:
-            return
-
-        now = self.get_clock().now().to_msg()
-        for transform in transforms:
-            transform.header.stamp = now
-            self.publish_target_transform(transform)
 
     def publish_target_transform(self, transform: TransformStamped) -> None:
         self.target_transform_broadcaster.sendTransform(transform)
