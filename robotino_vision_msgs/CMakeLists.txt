@@ -7,17 +7,20 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 
 set(dependencies
+  action_msgs
   rclcpp
   std_msgs
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ToggleObjectTracking.srv"
+  "action/AcquireObjectTracking.action"
 )
 
 ament_package()

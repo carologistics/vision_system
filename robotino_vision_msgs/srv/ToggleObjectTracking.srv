@@ -2,6 +2,7 @@ bool enable
 string object_prompt
 string reference_frame
 float64 distance_threshold
+float64 approach_distance
 float64 segmentation_confidence
 string target_color
 string object_tf_name
