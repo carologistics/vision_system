@@ -12,6 +12,7 @@ os.environ["YOLO_OFFLINE"] = "true"
 import cv2
 import numpy as np
 import rclpy
+from rclpy.duration import Duration
 from geometry_msgs.msg import TransformStamped
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -314,7 +315,6 @@ class ObjectTrackingNode(Node):
 
         response.success = True
         response.error = ""
-        print(1)
         return response
 
     def cancel_acquire_object_tracking(self, goal_handle) -> CancelResponse:
@@ -338,7 +338,7 @@ class ObjectTrackingNode(Node):
         target_color = request.target_color.strip().lower()
         object_tf_name = request.object_tf_name.strip()
         approach_tf_name = request.approach_tf_name.strip()
-        reference_frame = self.namespaced_frame(request.reference_frame)
+        reference_frame = request.reference_frame
         object_tf_frame = self.namespaced_frame(object_tf_name)
         approach_tf_frame = self.namespaced_frame(approach_tf_name)
 
@@ -478,6 +478,10 @@ class ObjectTrackingNode(Node):
             if self.acquire_session is session:
                 self.acquire_session = None
 
+    def is_acquire_session_active(self, session) -> bool:
+        with self.data_lock:
+            return self.acquire_session is session
+
     def update_pose(self) -> None:
         while rclpy.ok() and not self.stop_update_loop.is_set():
             with self.data_lock:
@@ -499,7 +503,6 @@ class ObjectTrackingNode(Node):
                     segmentation_confidence = self.current_segmentation_confidence
                     target_color = self.current_target_color
                     object_tf_name = self.current_object_tf_name
-
             if (not tracking_active and acquire_session is None) or image is None or pointcloud is None:
                 if acquire_session is not None:
                     missing = []
@@ -514,23 +517,32 @@ class ObjectTrackingNode(Node):
                 sleep(0.01)
                 continue
 
-            segmentation_map = self.create_segmentation_map(
-                image, segmentation_confidence, target_color
-            )
-            segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
-            with self.data_lock:
-                self.latest_segmentation_map = segmentation_map
+            try:
+                segmentation_map = self.create_segmentation_map(
+                    image, segmentation_confidence, target_color
+                )
+                segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
+                with self.data_lock:
+                    self.latest_segmentation_map = segmentation_map
 
-            candidate_positions = self.compute_candidate_positions(
-                segmentation_map, pointcloud
-            )
-            selected_candidate, rejection_reason = self.select_candidate_position(
-                candidate_positions,
-                reference_frame,
-                pointcloud,
-                distance_threshold,
-            )
-
+                candidate_positions = self.compute_candidate_positions(
+                    segmentation_map, pointcloud
+                )
+                selected_candidate, rejection_reason = self.select_candidate_position(
+                    candidate_positions,
+                    reference_frame,
+                    pointcloud,
+                    distance_threshold,
+                )
+            except Exception as exc:
+                rejection_reason = f"tracking update failed: {exc}"
+                self.get_logger().warn(rejection_reason)
+                if acquire_session is not None:
+                    self.log_acquire_info(acquire_session, rejection_reason)
+                    self.reset_acquire_stability(acquire_session)
+                    self.publish_acquire_feedback(acquire_session, False, 0, 0.0)
+                sleep(0.01)
+                continue
             if selected_candidate is not None:
                 object_position, object_distance = selected_candidate
                 if tracking_active:
@@ -541,14 +553,14 @@ class ObjectTrackingNode(Node):
                             object_tf_name,
                         )
                     )
-                    self.publish_target_transform(
-                        self.create_approach_transform(
-                            pointcloud,
-                            object_position,
-                            object_tf_name,
-                            approach_distance,
-                        )
+                    approach_transform = self.create_approach_transform(
+                        pointcloud,
+                        object_position,
+                        object_tf_name,
+                        approach_distance,
                     )
+                    if approach_transform is not None:
+                        self.publish_target_transform(approach_transform)
                 if acquire_session is not None:
                     self.update_acquire_session(
                         acquire_session,
@@ -578,10 +590,13 @@ class ObjectTrackingNode(Node):
         if not candidate_positions:
             return None, "no usable detections from segmentation and pointcloud"
 
-        reference_position = self.reference_position(
-            reference_frame,
-            pointcloud.header.stamp,
-        )
+        try:
+            reference_position = self.reference_position(
+                reference_frame,
+                pointcloud.header.stamp,
+            )
+        except Exception as exc:
+            return None, f"could not resolve reference_frame {reference_frame!r}: {exc}"
         candidate_distances = [
             float(np.linalg.norm(position - reference_position))
             for position in candidate_positions
@@ -601,6 +616,9 @@ class ObjectTrackingNode(Node):
         return (closest_position, closest_distance), ""
 
     def log_acquire_info(self, session, message: str, interval_sec: float = 1.0) -> None:
+        if not self.is_acquire_session_active(session):
+            return
+
         now = monotonic()
         last_time = session.get("last_debug_log_time", 0.0)
         last_message = session.get("last_debug_message", "")
@@ -625,6 +643,9 @@ class ObjectTrackingNode(Node):
         object_position: np.ndarray,
         object_distance: float,
     ) -> None:
+        if not self.is_acquire_session_active(session):
+            return
+
         try:
             acquired_transforms, object_in_odom = self.create_acquired_target_transforms(
                 pointcloud,
@@ -688,6 +709,9 @@ class ObjectTrackingNode(Node):
         stable_frames: int,
         object_distance: float,
     ) -> None:
+        if not self.is_acquire_session_active(session):
+            return
+
         feedback = AcquireObjectTracking.Feedback()
         feedback.detection_valid = detection_valid
         feedback.stable_frames = stable_frames
@@ -768,6 +792,7 @@ class ObjectTrackingNode(Node):
             self.target_parent_frame,
             reference_frame,
             Time.from_msg(stamp),
+            timeout=Duration(seconds=0.5),
         )
         translation = reference_transform.transform.translation
         return np.array(
