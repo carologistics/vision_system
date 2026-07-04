@@ -521,10 +521,14 @@ class ObjectTrackingNode(Node):
                 segmentation_map = self.create_segmentation_map(
                     image, segmentation_confidence, target_color
                 )
+                foreground_before_height_cut = int(np.count_nonzero(segmentation_map))
                 segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
+                self.log_height_cut_debug(
+                    segmentation_map,
+                    foreground_before_height_cut,
+                )
                 with self.data_lock:
                     self.latest_segmentation_map = segmentation_map
-
                 candidate_positions = self.compute_candidate_positions(
                     segmentation_map, pointcloud
                 )
@@ -751,30 +755,122 @@ class ObjectTrackingNode(Node):
         filtered_map[cutoff_row:, :] = 0
         return filtered_map
 
+    def log_height_cut_debug(
+        self,
+        segmentation_map: np.ndarray,
+        foreground_before_height_cut: int,
+    ) -> None:
+        if not self.debug:
+            return
+
+        cutoff_row = int(
+            np.ceil(segmentation_map.shape[0] * self.segmentation_height_fraction)
+        )
+        foreground_after_height_cut = int(np.count_nonzero(segmentation_map))
+        labels_after_height_cut = [
+            int(label) for label in np.unique(segmentation_map) if label != 0
+        ]
+        self.get_logger().info(
+            "Segmentation height cut: "
+            f"keep_rows=0:{cutoff_row}/{segmentation_map.shape[0]} "
+            f"keep_fraction={self.segmentation_height_fraction:.3f} "
+            f"foreground_before={foreground_before_height_cut} "
+            f"foreground_after={foreground_after_height_cut} "
+            f"labels_after={labels_after_height_cut}"
+        )
+
     def compute_candidate_positions(
         self,
         segmentation_map: np.ndarray,
         pointcloud: PointCloud2,
     ) -> list[np.ndarray]:
         points = self.pointcloud_xyz(pointcloud)
+        finite_points = np.isfinite(points).all(axis=2)
+        nonzero_points = np.abs(points).sum(axis=2) > np.finfo(np.float32).eps
+        usable_points = finite_points & nonzero_points
         candidate_positions = []
+
+        if self.debug:
+            labels = [int(label) for label in np.unique(segmentation_map) if label != 0]
+            self.get_logger().info(
+                "Candidate extraction input: "
+                f"segmentation={segmentation_map.shape[1]}x{segmentation_map.shape[0]} "
+                f"pointcloud={pointcloud.width}x{pointcloud.height} "
+                f"labels={labels} "
+                f"usable_pointcloud_pixels={int(np.count_nonzero(usable_points))}/"
+                f"{pointcloud.width * pointcloud.height}"
+            )
 
         for label in np.unique(segmentation_map):
             if label == 0:
                 continue
 
+            segmentation_mask = segmentation_map == label
             mask = self.resize_segmentation_mask_to_pointcloud(
-                segmentation_map == label, pointcloud
+                segmentation_mask, pointcloud
             )
-            valid_points = (
-                mask
-                & np.isfinite(points).all(axis=2)
-                & (np.abs(points).sum(axis=2) > np.finfo(np.float32).eps)
-            )
-            if np.any(valid_points):
-                candidate_positions.append(points[valid_points].mean(axis=0))
+            valid_points = mask & usable_points
+            valid_count = int(np.count_nonzero(valid_points))
+            if valid_count > 0:
+                candidate_position = points[valid_points].mean(axis=0)
+                candidate_positions.append(candidate_position)
+                if self.debug:
+                    self.log_candidate_debug(
+                        int(label),
+                        segmentation_mask,
+                        mask,
+                        finite_points,
+                        nonzero_points,
+                        valid_points,
+                        candidate_position,
+                    )
+            elif self.debug:
+                self.log_candidate_debug(
+                    int(label),
+                    segmentation_mask,
+                    mask,
+                    finite_points,
+                    nonzero_points,
+                    valid_points,
+                    None,
+                )
 
         return candidate_positions
+
+    def log_candidate_debug(
+        self,
+        label: int,
+        segmentation_mask: np.ndarray,
+        resized_mask: np.ndarray,
+        finite_points: np.ndarray,
+        nonzero_points: np.ndarray,
+        valid_points: np.ndarray,
+        candidate_position: Optional[np.ndarray],
+    ) -> None:
+        mask_pixels = int(np.count_nonzero(resized_mask))
+        finite_pixels = int(np.count_nonzero(resized_mask & finite_points))
+        finite_nonzero_pixels = int(np.count_nonzero(valid_points))
+        finite_zero_pixels = int(
+            np.count_nonzero(resized_mask & finite_points & ~nonzero_points)
+        )
+        nonfinite_pixels = mask_pixels - finite_pixels
+        candidate_msg = "none"
+        if candidate_position is not None:
+            candidate_msg = (
+                f"({candidate_position[0]:.3f}, "
+                f"{candidate_position[1]:.3f}, "
+                f"{candidate_position[2]:.3f})"
+            )
+
+        self.get_logger().info(
+            "Candidate label "
+            f"{label}: segmentation_pixels={int(np.count_nonzero(segmentation_mask))} "
+            f"resized_mask_pixels={mask_pixels} "
+            f"valid_xyz_pixels={finite_nonzero_pixels} "
+            f"nonfinite_pixels={nonfinite_pixels} "
+            f"finite_zero_pixels={finite_zero_pixels} "
+            f"candidate={candidate_msg}"
+        )
 
     def resize_segmentation_mask_to_pointcloud(
         self,
