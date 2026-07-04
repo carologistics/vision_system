@@ -16,6 +16,15 @@ bool success
 string error
 string object_tf_name
 string approach_tf_name
+float64 object_base_x
+float64 object_base_y
+float64 object_base_z
+float64 approach_base_x
+float64 approach_base_y
+float64 approach_base_yaw
+float64 object_end_effector_home_x
+float64 object_end_effector_home_y
+float64 object_end_effector_home_z
 ---
 # Feedback
 bool detection_valid

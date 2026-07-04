@@ -12,7 +12,6 @@ os.environ["YOLO_OFFLINE"] = "true"
 import cv2
 import numpy as np
 import rclpy
-from geometry_msgs.msg import TransformStamped
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -21,7 +20,6 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from robotino_vision_msgs.action import AcquireObjectTracking
 from robotino_vision_msgs.srv import ToggleObjectTracking
 from sensor_msgs.msg import Image, PointCloud2, PointField
-from tf2_ros import TransformBroadcaster
 import ultralytics
 from ultralytics.utils import downloads as ultralytics_downloads
 from ultralytics import YOLOE
@@ -42,6 +40,7 @@ GRIPPER_CAM_TO_BASE_ROTATION = np.array(
     dtype=np.float64,
 )
 GRIPPER_CAM_TO_BASE_TRANSLATION = np.array([0.187, -0.028, 0.958], dtype=np.float64)
+BASE_TO_END_EFFECTOR_HOME_TRANSLATION = np.array([0.2092, -0.0265, 0.891], dtype=np.float64)
 MAX_SEGMENTED_POINT_DISTANCE_FROM_CAMERA_M = 1.0
 
 # OpenCV HSV uses hue in [0, 179]. Saturation/value lower bounds keep low-color
@@ -194,7 +193,6 @@ class ObjectTrackingNode(Node):
             cancel_callback=self.cancel_acquire_object_tracking,
             callback_group=self.sensor_callback_group,
         )
-        self.target_transform_broadcaster = TransformBroadcaster(self)
         self.update_thread = Thread(
             target=self.update_pose,
             name="object_tracking_update_pose",
@@ -215,14 +213,15 @@ class ObjectTrackingNode(Node):
             f"{self.target_parent_frame} to {self.base_frame} with a hard-coded transform"
         )
         self.get_logger().info(
-            "Object approach TF: "
-            f"parent={self.base_frame} suffix={self.approach_frame_suffix} "
-            f"distance={self.approach_distance:.3f} m"
+            "Object approach output: "
+            f"frame={self.base_frame} distance={self.approach_distance:.3f} m"
         )
-        self.get_logger().info(f"Object TFs use parent frame {self.base_frame}")
+        self.get_logger().info(
+            "Object acquisition outputs positions in "
+            f"{self.base_frame} and end_effector_home; no TFs are broadcast"
+        )
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Object acquisition action ready on acquire_object_tracking")
-        self.get_logger().info("Target transforms will be broadcast on /tf")
         if self.debug:
             self.get_logger().info(
                 f"Debug segmented image will be published on {SEGMENTED_IMAGE_TOPIC}"
@@ -375,6 +374,10 @@ class ObjectTrackingNode(Node):
             "stable_frames": 0,
             "last_object_position": None,
             "last_object_distance": 0.0,
+            "object_base_position": None,
+            "approach_base_position": None,
+            "approach_base_yaw": 0.0,
+            "object_end_effector_home_position": None,
             "last_debug_log_time": 0.0,
             "last_debug_message": "",
             "success": False,
@@ -426,6 +429,10 @@ class ObjectTrackingNode(Node):
         with self.data_lock:
             success = session["success"]
             error = session["error"]
+            object_base_position = session["object_base_position"]
+            approach_base_position = session["approach_base_position"]
+            approach_base_yaw = session["approach_base_yaw"]
+            object_end_effector_home_position = session["object_end_effector_home_position"]
             if self.acquire_session is session:
                 self.acquire_session = None
 
@@ -433,12 +440,25 @@ class ObjectTrackingNode(Node):
         result.error = error
         result.object_tf_name = object_tf_frame
         result.approach_tf_name = approach_tf_frame
+        self.set_acquire_result_positions(
+            result,
+            object_base_position,
+            approach_base_position,
+            approach_base_yaw,
+            object_end_effector_home_position,
+        )
 
         if result.success:
             goal_handle.succeed()
             self.get_logger().info(
                 "Object acquisition succeeded: "
-                f"object_tf={result.object_tf_name} approach_tf={result.approach_tf_name}"
+                f"object_base=({result.object_base_x:.3f}, {result.object_base_y:.3f}, "
+                f"{result.object_base_z:.3f}) "
+                f"approach_base=({result.approach_base_x:.3f}, "
+                f"{result.approach_base_y:.3f}, yaw={result.approach_base_yaw:.3f}) "
+                f"object_end_effector_home=({result.object_end_effector_home_x:.3f}, "
+                f"{result.object_end_effector_home_y:.3f}, "
+                f"{result.object_end_effector_home_z:.3f})"
             )
         else:
             goal_handle.abort()
@@ -493,12 +513,10 @@ class ObjectTrackingNode(Node):
                     approach_distance = acquire_session["approach_distance"]
                     segmentation_confidence = acquire_session["segmentation_confidence"]
                     target_color = acquire_session["target_color"]
-                    object_tf_name = acquire_session["object_tf_name"]
                 else:
                     approach_distance = self.current_approach_distance
                     segmentation_confidence = self.current_segmentation_confidence
                     target_color = self.current_target_color
-                    object_tf_name = self.current_object_tf_name
             if (not tracking_active and acquire_session is None) or image is None or pointcloud is None:
                 if acquire_session is not None:
                     missing = []
@@ -537,21 +555,17 @@ class ObjectTrackingNode(Node):
             if selected_candidate is not None:
                 object_position, object_distance = selected_candidate
                 if tracking_active:
-                    self.publish_target_transform(
-                        self.create_target_transform(
-                            pointcloud,
-                            object_position,
-                            object_tf_name,
-                        )
-                    )
-                    approach_transform = self.create_approach_transform(
-                        pointcloud,
+                    approach_position, approach_yaw = self.create_approach_target(
                         object_position,
-                        object_tf_name,
                         approach_distance,
                     )
-                    if approach_transform is not None:
-                        self.publish_target_transform(approach_transform)
+                    self.get_logger().debug(
+                        "Object tracking selected target: "
+                        f"object_base=({object_position[0]:.3f}, {object_position[1]:.3f}, "
+                        f"{object_position[2]:.3f}) "
+                        f"approach_base=({approach_position[0]:.3f}, "
+                        f"{approach_position[1]:.3f}, yaw={approach_yaw:.3f})"
+                    )
                 if acquire_session is not None:
                     self.update_acquire_session(
                         acquire_session,
@@ -602,6 +616,10 @@ class ObjectTrackingNode(Node):
                 session["stable_frames"] = 0
                 session["last_object_position"] = None
                 session["last_object_distance"] = 0.0
+                session["object_base_position"] = None
+                session["approach_base_position"] = None
+                session["approach_base_yaw"] = 0.0
+                session["object_end_effector_home_position"] = None
 
     def update_acquire_session(
         self,
@@ -613,19 +631,11 @@ class ObjectTrackingNode(Node):
         if not self.is_acquire_session_active(session):
             return
 
-        try:
-            acquired_transforms, object_in_odom = self.create_acquired_target_transforms(
-                pointcloud,
-                object_position,
-                session["object_tf_name"],
-                session["approach_tf_name"],
-                session["approach_distance"],
-            )
-        except Exception as exc:
-            self.get_logger().warn(f"Could not create object acquisition TFs: {exc}")
-            self.reset_acquire_stability(session)
-            self.publish_acquire_feedback(session, False, 0, object_distance)
-            return
+        approach_position, approach_yaw = self.create_approach_target(
+            object_position,
+            session["approach_distance"],
+        )
+        object_end_effector_home = self.base_to_end_effector_home(object_position)
 
         with self.data_lock:
             if self.acquire_session is not session:
@@ -635,7 +645,7 @@ class ObjectTrackingNode(Node):
             if last_position is None:
                 stable_frames = 1
             else:
-                position_jump = float(np.linalg.norm(object_in_odom - last_position))
+                position_jump = float(np.linalg.norm(object_position - last_position))
                 stable_frames = (
                     session["stable_frames"] + 1
                     if position_jump <= session["max_position_jump"]
@@ -643,15 +653,16 @@ class ObjectTrackingNode(Node):
                 )
 
             session["stable_frames"] = stable_frames
-            session["last_object_position"] = object_in_odom
+            session["last_object_position"] = object_position
             session["last_object_distance"] = object_distance
+            session["object_base_position"] = object_position
+            session["approach_base_position"] = approach_position
+            session["approach_base_yaw"] = approach_yaw
+            session["object_end_effector_home_position"] = object_end_effector_home
             acquired = stable_frames >= session["min_stable_frames"]
             if acquired:
                 session["success"] = True
                 session["error"] = ""
-
-        for transform in acquired_transforms:
-            self.publish_target_transform(transform)
 
         if acquired:
             session["event"].set()
@@ -880,75 +891,12 @@ class ObjectTrackingNode(Node):
                 return field
         return None
 
-    def create_target_transform(
+    def create_approach_target(
         self,
-        pointcloud: PointCloud2,
-        position: np.ndarray,
-        object_tf_name: str,
-    ) -> TransformStamped:
-        transform = TransformStamped()
-        transform.header.stamp = pointcloud.header.stamp
-        transform.header.frame_id = self.base_frame
-        transform.child_frame_id = self.namespaced_frame(object_tf_name)
-        transform.transform.translation.x = float(position[0])
-        transform.transform.translation.y = float(position[1])
-        transform.transform.translation.z = float(position[2])
-        transform.transform.rotation.w = 1.0
-        return transform
-
-    def create_approach_transform(
-        self,
-        pointcloud: PointCloud2,
         object_position: np.ndarray,
-        object_tf_name: str,
         approach_distance: float,
-    ) -> TransformStamped:
+    ) -> tuple[np.ndarray, float]:
         object_xy = object_position[:2].astype(np.float64, copy=False)
-        object_distance = float(np.linalg.norm(object_xy))
-        if object_distance <= np.finfo(np.float64).eps:
-            approach_xy = object_xy
-        else:
-            target_distance = max(object_distance - approach_distance, 0.0)
-            approach_xy = object_xy * (target_distance / object_distance)
-
-        transform = TransformStamped()
-        transform.header.stamp = pointcloud.header.stamp
-        transform.header.frame_id = self.base_frame
-        transform.child_frame_id = self.namespaced_frame(
-            f"{object_tf_name}{self.approach_frame_suffix}"
-        )
-        yaw_to_object = 0.0
-        if object_distance > np.finfo(np.float64).eps:
-            yaw_to_object = float(np.arctan2(object_xy[1], object_xy[0]))
-
-        transform.transform.translation.x = float(approach_xy[0])
-        transform.transform.translation.y = float(approach_xy[1])
-        transform.transform.translation.z = 0.0
-        transform.transform.rotation.z = float(np.sin(0.5 * yaw_to_object))
-        transform.transform.rotation.w = float(np.cos(0.5 * yaw_to_object))
-        return transform
-
-    def create_acquired_target_transforms(
-        self,
-        pointcloud: PointCloud2,
-        object_position: np.ndarray,
-        object_tf_name: str,
-        approach_tf_name: str,
-        approach_distance: float,
-    ) -> tuple[list[TransformStamped], np.ndarray]:
-        stamp = pointcloud.header.stamp
-        object_in_base = object_position.astype(np.float64, copy=False)
-
-        object_transform = TransformStamped()
-        object_transform.header.stamp = stamp
-        object_transform.header.frame_id = self.base_frame
-        object_transform.child_frame_id = self.namespaced_frame(object_tf_name)
-        object_transform.transform.translation.x = float(object_in_base[0])
-        object_transform.transform.translation.y = float(object_in_base[1])
-        object_transform.transform.translation.z = float(object_in_base[2])
-        object_transform.transform.rotation.w = 1.0
-
-        object_xy = object_in_base[:2]
         object_distance = float(np.linalg.norm(object_xy))
         if object_distance <= np.finfo(np.float64).eps:
             approach_xy = object_xy
@@ -958,17 +906,40 @@ class ObjectTrackingNode(Node):
             approach_xy = object_xy * (target_distance / object_distance)
             yaw_to_object = float(np.arctan2(object_xy[1], object_xy[0]))
 
-        approach_transform = TransformStamped()
-        approach_transform.header.stamp = stamp
-        approach_transform.header.frame_id = self.base_frame
-        approach_transform.child_frame_id = self.namespaced_frame(approach_tf_name)
-        approach_transform.transform.translation.x = float(approach_xy[0])
-        approach_transform.transform.translation.y = float(approach_xy[1])
-        approach_transform.transform.translation.z = 0.0
-        approach_transform.transform.rotation.z = float(np.sin(0.5 * yaw_to_object))
-        approach_transform.transform.rotation.w = float(np.cos(0.5 * yaw_to_object))
+        return np.array([approach_xy[0], approach_xy[1], 0.0], dtype=np.float64), yaw_to_object
 
-        return [object_transform, approach_transform], object_in_base
+    def base_to_end_effector_home(self, position: np.ndarray) -> np.ndarray:
+        return position.astype(np.float64, copy=False) - BASE_TO_END_EFFECTOR_HOME_TRANSLATION
+
+    def set_acquire_result_positions(
+        self,
+        result: AcquireObjectTracking.Result,
+        object_base_position: Optional[np.ndarray],
+        approach_base_position: Optional[np.ndarray],
+        approach_base_yaw: float,
+        object_end_effector_home_position: Optional[np.ndarray],
+    ) -> None:
+        object_base = self.zero_position_if_missing(object_base_position)
+        approach_base = self.zero_position_if_missing(approach_base_position)
+        object_end_effector_home = self.zero_position_if_missing(
+            object_end_effector_home_position
+        )
+
+        result.object_base_x = float(object_base[0])
+        result.object_base_y = float(object_base[1])
+        result.object_base_z = float(object_base[2])
+        result.approach_base_x = float(approach_base[0])
+        result.approach_base_y = float(approach_base[1])
+        result.approach_base_yaw = float(approach_base_yaw)
+        result.object_end_effector_home_x = float(object_end_effector_home[0])
+        result.object_end_effector_home_y = float(object_end_effector_home[1])
+        result.object_end_effector_home_z = float(object_end_effector_home[2])
+
+    @staticmethod
+    def zero_position_if_missing(position: Optional[np.ndarray]) -> np.ndarray:
+        if position is None:
+            return np.zeros(3, dtype=np.float64)
+        return position.astype(np.float64, copy=False)
 
     def publish_segmented_image(self, image: Image, segmentation_overlay: np.ndarray) -> None:
         if self.segmented_image_publisher is None:
@@ -1139,9 +1110,6 @@ class ObjectTrackingNode(Node):
             .reshape(image.height, image.width, 3)
             .copy()
         )
-
-    def publish_target_transform(self, transform: TransformStamped) -> None:
-        self.target_transform_broadcaster.sendTransform(transform)
 
 
 def main(args: Optional[list[str]] = None) -> None:
