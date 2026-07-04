@@ -12,18 +12,16 @@ os.environ["YOLO_OFFLINE"] = "true"
 import cv2
 import numpy as np
 import rclpy
-from rclpy.duration import Duration
 from geometry_msgs.msg import TransformStamped
 from rclpy.action import ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.time import Time
 from robotino_vision_msgs.action import AcquireObjectTracking
 from robotino_vision_msgs.srv import ToggleObjectTracking
 from sensor_msgs.msg import Image, PointCloud2, PointField
-from tf2_ros import Buffer, TransformBroadcaster, TransformListener
+from tf2_ros import TransformBroadcaster
 import ultralytics
 from ultralytics.utils import downloads as ultralytics_downloads
 from ultralytics import YOLOE
@@ -35,6 +33,16 @@ ORANGE_BGR = np.array([0, 165, 255], dtype=np.uint8)
 DEFAULT_OBJECT_TF_NAME = "tracked_object"
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models"
 MODEL_PATH = MODEL_DIR / "yoloe-26n-seg.pt"
+GRIPPER_CAM_TO_BASE_ROTATION = np.array(
+    [
+        [-0.086, 0.000, 0.996],
+        [-0.996, -0.000, -0.086],
+        [0.000, -1.000, 0.000],
+    ],
+    dtype=np.float64,
+)
+GRIPPER_CAM_TO_BASE_TRANSLATION = np.array([0.187, -0.028, 0.958], dtype=np.float64)
+MAX_SEGMENTED_POINT_DISTANCE_FROM_CAMERA_M = 1.0
 
 # OpenCV HSV uses hue in [0, 179]. Saturation/value lower bounds keep low-color
 # grey or shadowed pixels from matching arbitrary hues.
@@ -107,11 +115,6 @@ class ObjectTrackingNode(Node):
             .get_parameter_value()
             .double_value
         )
-        if not 0.0 <= self.segmentation_height_fraction <= 1.0:
-            raise ValueError(
-                "segmentation_height_fraction must be in [0.0, 1.0] "
-                f"but is {self.segmentation_height_fraction}"
-            )
         self.approach_distance = (
             self.declare_parameter("approach_distance", 0.35)
             .get_parameter_value()
@@ -130,7 +133,6 @@ class ObjectTrackingNode(Node):
         if not self.approach_frame_suffix:
             raise ValueError("approach_frame_suffix must not be empty")
         self.base_frame = self.namespaced_frame("base_link")
-        self.odom_frame = self.namespaced_frame("odom")
         self.target_parent_frame = self.namespaced_frame("gripper_cam")
 
         self.latest_image: Optional[Image] = None
@@ -193,8 +195,6 @@ class ObjectTrackingNode(Node):
             callback_group=self.sensor_callback_group,
         )
         self.target_transform_broadcaster = TransformBroadcaster(self)
-        self.tf_buffer = Buffer()
-        self.tf_listener = TransformListener(self.tf_buffer, self)
         self.update_thread = Thread(
             target=self.update_pose,
             name="object_tracking_update_pose",
@@ -208,18 +208,18 @@ class ObjectTrackingNode(Node):
             f"Segmentation confidence threshold: {self.segmentation_confidence:.2f}"
         )
         self.get_logger().info(
-            "Segmentation height ROI: "
-            f"top {self.segmentation_height_fraction * 100.0:.1f}% of the image"
+            "Segmentation height ROI parameter is ignored; the full image is used"
         )
         self.get_logger().info(
-            f"Target parent TF frame: {self.target_parent_frame}"
+            "Pointcloud positions are transformed from "
+            f"{self.target_parent_frame} to {self.base_frame} with a hard-coded transform"
         )
         self.get_logger().info(
             "Object approach TF: "
             f"parent={self.base_frame} suffix={self.approach_frame_suffix} "
             f"distance={self.approach_distance:.3f} m"
         )
-        self.get_logger().info(f"Acquired object TFs use parent frame {self.odom_frame}")
+        self.get_logger().info(f"Object TFs use parent frame {self.base_frame}")
         self.get_logger().info("Object tracking service ready on object_tracking")
         self.get_logger().info("Object acquisition action ready on acquire_object_tracking")
         self.get_logger().info("Target transforms will be broadcast on /tf")
@@ -490,15 +490,11 @@ class ObjectTrackingNode(Node):
                 image = self.latest_image
                 pointcloud = self.latest_pointcloud
                 if acquire_session is not None:
-                    reference_frame = acquire_session["reference_frame"]
-                    distance_threshold = acquire_session["distance_threshold"]
                     approach_distance = acquire_session["approach_distance"]
                     segmentation_confidence = acquire_session["segmentation_confidence"]
                     target_color = acquire_session["target_color"]
                     object_tf_name = acquire_session["object_tf_name"]
                 else:
-                    reference_frame = self.current_reference_frame
-                    distance_threshold = self.current_distance_threshold
                     approach_distance = self.current_approach_distance
                     segmentation_confidence = self.current_segmentation_confidence
                     target_color = self.current_target_color
@@ -521,12 +517,6 @@ class ObjectTrackingNode(Node):
                 segmentation_map = self.create_segmentation_map(
                     image, segmentation_confidence, target_color
                 )
-                foreground_before_height_cut = int(np.count_nonzero(segmentation_map))
-                segmentation_map = self.apply_segmentation_height_cut(segmentation_map)
-                self.log_height_cut_debug(
-                    segmentation_map,
-                    foreground_before_height_cut,
-                )
                 with self.data_lock:
                     self.latest_segmentation_map = segmentation_map
                 candidate_positions = self.compute_candidate_positions(
@@ -534,9 +524,6 @@ class ObjectTrackingNode(Node):
                 )
                 selected_candidate, rejection_reason = self.select_candidate_position(
                     candidate_positions,
-                    reference_frame,
-                    pointcloud,
-                    distance_threshold,
                 )
             except Exception as exc:
                 rejection_reason = f"tracking update failed: {exc}"
@@ -587,37 +574,13 @@ class ObjectTrackingNode(Node):
     def select_candidate_position(
         self,
         candidate_positions: list[np.ndarray],
-        reference_frame: str,
-        pointcloud: PointCloud2,
-        distance_threshold: float,
     ) -> tuple[Optional[tuple[np.ndarray, float]], str]:
         if not candidate_positions:
             return None, "no usable detections from segmentation and pointcloud"
 
-        try:
-            reference_position = self.reference_position(
-                reference_frame,
-                pointcloud.header.stamp,
-            )
-        except Exception as exc:
-            return None, f"could not resolve reference_frame {reference_frame!r}: {exc}"
-        candidate_distances = [
-            float(np.linalg.norm(position - reference_position))
-            for position in candidate_positions
-        ]
+        candidate_distances = [float(np.linalg.norm(position)) for position in candidate_positions]
         closest_index = int(np.argmin(candidate_distances))
-        closest_distance = candidate_distances[closest_index]
-        closest_position = candidate_positions[closest_index]
-        xy_distance = float(np.linalg.norm(closest_position[:2] - reference_position[:2]))
-        z_distance = float(abs(closest_position[2] - reference_position[2]))
-        if closest_distance > distance_threshold:
-            return None, (
-                "closest detection too far: "
-                f"distance={closest_distance:.3f} m allowed={distance_threshold:.3f} m "
-                f"xy={xy_distance:.3f} m z_delta={z_distance:.3f} m "
-                f"candidates={len(candidate_positions)}"
-            )
-        return (closest_position, closest_distance), ""
+        return (candidate_positions[closest_index], candidate_distances[closest_index]), ""
 
     def log_acquire_info(self, session, message: str, interval_sec: float = 1.0) -> None:
         if not self.is_acquire_session_active(session):
@@ -747,38 +710,6 @@ class ObjectTrackingNode(Node):
 
         return overlay
 
-    def apply_segmentation_height_cut(self, segmentation_map: np.ndarray) -> np.ndarray:
-        cutoff_row = int(
-            np.ceil(segmentation_map.shape[0] * self.segmentation_height_fraction)
-        )
-        filtered_map = segmentation_map.copy()
-        filtered_map[cutoff_row:, :] = 0
-        return filtered_map
-
-    def log_height_cut_debug(
-        self,
-        segmentation_map: np.ndarray,
-        foreground_before_height_cut: int,
-    ) -> None:
-        if not self.debug:
-            return
-
-        cutoff_row = int(
-            np.ceil(segmentation_map.shape[0] * self.segmentation_height_fraction)
-        )
-        foreground_after_height_cut = int(np.count_nonzero(segmentation_map))
-        labels_after_height_cut = [
-            int(label) for label in np.unique(segmentation_map) if label != 0
-        ]
-        self.get_logger().info(
-            "Segmentation height cut: "
-            f"keep_rows=0:{cutoff_row}/{segmentation_map.shape[0]} "
-            f"keep_fraction={self.segmentation_height_fraction:.3f} "
-            f"foreground_before={foreground_before_height_cut} "
-            f"foreground_after={foreground_after_height_cut} "
-            f"labels_after={labels_after_height_cut}"
-        )
-
     def compute_candidate_positions(
         self,
         segmentation_map: np.ndarray,
@@ -787,7 +718,9 @@ class ObjectTrackingNode(Node):
         points = self.pointcloud_xyz(pointcloud)
         finite_points = np.isfinite(points).all(axis=2)
         nonzero_points = np.abs(points).sum(axis=2) > np.finfo(np.float32).eps
-        usable_points = finite_points & nonzero_points
+        camera_distance_sq = np.sum(points.astype(np.float64, copy=False) ** 2, axis=2)
+        close_points = camera_distance_sq <= MAX_SEGMENTED_POINT_DISTANCE_FROM_CAMERA_M ** 2
+        usable_points = finite_points & nonzero_points & close_points
         candidate_positions = []
 
         if self.debug:
@@ -798,7 +731,8 @@ class ObjectTrackingNode(Node):
                 f"pointcloud={pointcloud.width}x{pointcloud.height} "
                 f"labels={labels} "
                 f"usable_pointcloud_pixels={int(np.count_nonzero(usable_points))}/"
-                f"{pointcloud.width * pointcloud.height}"
+                f"{pointcloud.width * pointcloud.height} "
+                f"max_camera_distance={MAX_SEGMENTED_POINT_DISTANCE_FROM_CAMERA_M:.3f}m"
             )
 
         for label in np.unique(segmentation_map):
@@ -812,7 +746,9 @@ class ObjectTrackingNode(Node):
             valid_points = mask & usable_points
             valid_count = int(np.count_nonzero(valid_points))
             if valid_count > 0:
-                candidate_position = points[valid_points].mean(axis=0)
+                candidate_position = self.gripper_cam_to_base(
+                    points[valid_points].mean(axis=0)
+                )
                 candidate_positions.append(candidate_position)
                 if self.debug:
                     self.log_candidate_debug(
@@ -821,6 +757,7 @@ class ObjectTrackingNode(Node):
                         mask,
                         finite_points,
                         nonzero_points,
+                        close_points,
                         valid_points,
                         candidate_position,
                     )
@@ -831,6 +768,7 @@ class ObjectTrackingNode(Node):
                     mask,
                     finite_points,
                     nonzero_points,
+                    close_points,
                     valid_points,
                     None,
                 )
@@ -844,6 +782,7 @@ class ObjectTrackingNode(Node):
         resized_mask: np.ndarray,
         finite_points: np.ndarray,
         nonzero_points: np.ndarray,
+        close_points: np.ndarray,
         valid_points: np.ndarray,
         candidate_position: Optional[np.ndarray],
     ) -> None:
@@ -852,6 +791,9 @@ class ObjectTrackingNode(Node):
         finite_nonzero_pixels = int(np.count_nonzero(valid_points))
         finite_zero_pixels = int(
             np.count_nonzero(resized_mask & finite_points & ~nonzero_points)
+        )
+        too_far_pixels = int(
+            np.count_nonzero(resized_mask & finite_points & nonzero_points & ~close_points)
         )
         nonfinite_pixels = mask_pixels - finite_pixels
         candidate_msg = "none"
@@ -869,7 +811,14 @@ class ObjectTrackingNode(Node):
             f"valid_xyz_pixels={finite_nonzero_pixels} "
             f"nonfinite_pixels={nonfinite_pixels} "
             f"finite_zero_pixels={finite_zero_pixels} "
+            f"too_far_pixels={too_far_pixels} "
             f"candidate={candidate_msg}"
+        )
+
+    def gripper_cam_to_base(self, position: np.ndarray) -> np.ndarray:
+        return (
+            GRIPPER_CAM_TO_BASE_ROTATION @ position.astype(np.float64, copy=False)
+            + GRIPPER_CAM_TO_BASE_TRANSLATION
         )
 
     def resize_segmentation_mask_to_pointcloud(
@@ -882,19 +831,6 @@ class ObjectTrackingNode(Node):
             (pointcloud.width, pointcloud.height),
             interpolation=cv2.INTER_NEAREST,
         ).astype(bool)
-
-    def reference_position(self, reference_frame: str, stamp) -> np.ndarray:
-        reference_transform = self.tf_buffer.lookup_transform(
-            self.target_parent_frame,
-            reference_frame,
-            Time.from_msg(stamp),
-            timeout=Duration(seconds=0.5),
-        )
-        translation = reference_transform.transform.translation
-        return np.array(
-            [translation.x, translation.y, translation.z],
-            dtype=np.float32,
-        )
 
     def pointcloud_xyz(self, pointcloud: PointCloud2) -> np.ndarray:
         x_field = self.find_point_field(pointcloud, "x")
@@ -952,7 +888,7 @@ class ObjectTrackingNode(Node):
     ) -> TransformStamped:
         transform = TransformStamped()
         transform.header.stamp = pointcloud.header.stamp
-        transform.header.frame_id = self.target_parent_frame
+        transform.header.frame_id = self.base_frame
         transform.child_frame_id = self.namespaced_frame(object_tf_name)
         transform.transform.translation.x = float(position[0])
         transform.transform.translation.y = float(position[1])
@@ -966,22 +902,8 @@ class ObjectTrackingNode(Node):
         object_position: np.ndarray,
         object_tf_name: str,
         approach_distance: float,
-    ) -> Optional[TransformStamped]:
-        try:
-            object_in_base = self.transform_position(
-                object_position,
-                self.target_parent_frame,
-                self.base_frame,
-                pointcloud.header.stamp,
-            )
-        except Exception as exc:
-            self.get_logger().warn(
-                "Could not create approach TF from "
-                f"{self.base_frame} to {object_tf_name}: {exc}"
-            )
-            return None
-
-        object_xy = object_in_base[:2].astype(np.float64, copy=False)
+    ) -> TransformStamped:
+        object_xy = object_position[:2].astype(np.float64, copy=False)
         object_distance = float(np.linalg.norm(object_xy))
         if object_distance <= np.finfo(np.float64).eps:
             approach_xy = object_xy
@@ -1015,42 +937,30 @@ class ObjectTrackingNode(Node):
         approach_distance: float,
     ) -> tuple[list[TransformStamped], np.ndarray]:
         stamp = pointcloud.header.stamp
-        object_in_odom = self.transform_position(
-            object_position,
-            self.target_parent_frame,
-            self.odom_frame,
-            stamp,
-        )
-        base_in_odom = self.transform_position(
-            np.zeros(3, dtype=np.float64),
-            self.base_frame,
-            self.odom_frame,
-            stamp,
-        )
+        object_in_base = object_position.astype(np.float64, copy=False)
 
         object_transform = TransformStamped()
         object_transform.header.stamp = stamp
-        object_transform.header.frame_id = self.odom_frame
+        object_transform.header.frame_id = self.base_frame
         object_transform.child_frame_id = self.namespaced_frame(object_tf_name)
-        object_transform.transform.translation.x = float(object_in_odom[0])
-        object_transform.transform.translation.y = float(object_in_odom[1])
-        object_transform.transform.translation.z = float(object_in_odom[2])
+        object_transform.transform.translation.x = float(object_in_base[0])
+        object_transform.transform.translation.y = float(object_in_base[1])
+        object_transform.transform.translation.z = float(object_in_base[2])
         object_transform.transform.rotation.w = 1.0
 
-        base_xy = base_in_odom[:2].astype(np.float64, copy=False)
-        object_xy = object_in_odom[:2].astype(np.float64, copy=False)
-        base_to_object = object_xy - base_xy
-        object_distance = float(np.linalg.norm(base_to_object))
+        object_xy = object_in_base[:2]
+        object_distance = float(np.linalg.norm(object_xy))
         if object_distance <= np.finfo(np.float64).eps:
-            approach_xy = base_xy
+            approach_xy = object_xy
             yaw_to_object = 0.0
         else:
-            approach_xy = object_xy - approach_distance * base_to_object / object_distance
-            yaw_to_object = float(np.arctan2(base_to_object[1], base_to_object[0]))
+            target_distance = max(object_distance - approach_distance, 0.0)
+            approach_xy = object_xy * (target_distance / object_distance)
+            yaw_to_object = float(np.arctan2(object_xy[1], object_xy[0]))
 
         approach_transform = TransformStamped()
         approach_transform.header.stamp = stamp
-        approach_transform.header.frame_id = self.odom_frame
+        approach_transform.header.frame_id = self.base_frame
         approach_transform.child_frame_id = self.namespaced_frame(approach_tf_name)
         approach_transform.transform.translation.x = float(approach_xy[0])
         approach_transform.transform.translation.y = float(approach_xy[1])
@@ -1058,48 +968,7 @@ class ObjectTrackingNode(Node):
         approach_transform.transform.rotation.z = float(np.sin(0.5 * yaw_to_object))
         approach_transform.transform.rotation.w = float(np.cos(0.5 * yaw_to_object))
 
-        return [object_transform, approach_transform], object_in_odom
-
-    def transform_position(
-        self,
-        position: np.ndarray,
-        source_frame: str,
-        target_frame: str,
-        stamp,
-    ) -> np.ndarray:
-        transform = self.tf_buffer.lookup_transform(
-            target_frame,
-            source_frame,
-            Time.from_msg(stamp),
-        )
-        rotation = self.quaternion_to_rotation_matrix(transform.transform.rotation)
-        translation = transform.transform.translation
-        return rotation @ position.astype(np.float64, copy=False) + np.array(
-            [translation.x, translation.y, translation.z],
-            dtype=np.float64,
-        )
-
-    def quaternion_to_rotation_matrix(self, quaternion) -> np.ndarray:
-        x = float(quaternion.x)
-        y = float(quaternion.y)
-        z = float(quaternion.z)
-        w = float(quaternion.w)
-        norm = np.sqrt(x * x + y * y + z * z + w * w)
-        if norm <= np.finfo(np.float64).eps:
-            return np.eye(3, dtype=np.float64)
-
-        x /= norm
-        y /= norm
-        z /= norm
-        w /= norm
-        return np.array(
-            [
-                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
-            ],
-            dtype=np.float64,
-        )
+        return [object_transform, approach_transform], object_in_base
 
     def publish_segmented_image(self, image: Image, segmentation_overlay: np.ndarray) -> None:
         if self.segmented_image_publisher is None:
